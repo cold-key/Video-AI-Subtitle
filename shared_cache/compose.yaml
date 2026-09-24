@@ -1,0 +1,14 @@
+services:
+  cache:
+    build:
+      context: ..
+      dockerfile: shared_cache/Dockerfile
+    environment:
+      SHARED_CACHE_TOKEN: ${SHARED_CACHE_TOKEN:?Set SHARED_CACHE_TOKEN}
+    ports:
+      - "127.0.0.1:18766:18766"
+    volumes:
+      - cache-data:/data
+    restart: unless-stopped
+volumes:
+  cache-data:

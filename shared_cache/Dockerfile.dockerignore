@@ -1,0 +1,12 @@
+**
+!shared_cache/
+!shared_cache/**
+!service/
+!service/app/
+!service/app/models.py
+!service/app/shared_schema.py
+**/__pycache__/
+**/*.pyc
+**/*.sqlite3*
+**/.env
+shared_cache/data/

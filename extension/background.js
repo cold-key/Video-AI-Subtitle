@@ -112,7 +112,7 @@ async function fetchBilibiliJson(url) {
   if (!response.ok) throw new Error(`B站接口 ${response.status}`);
   const payload = await response.json();
   if (Number(payload?.code || 0) !== 0) throw new Error(payload?.message || "B站接口返回失败");
-  return payload.data;
+  return payload.data ?? payload.result;
 }
 
 async function resolveBilibiliUrlResource(rawUrl) {
@@ -295,6 +295,10 @@ async function startCurrentVideo(tab) {
 // Moon End
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "resolve-bilibili-resource") {
+    resolveBilibiliUrlResource(message.url).then(identity=>sendResponse({identity})).catch(()=>sendResponse({error:"无法确认当前视频身份"}));
+    return true;
+  }
   if (message.type === "ensure-service") {
     ensureService(sendResponse, message);
     return true;

@@ -1,6 +1,6 @@
 // Moon Begin
 const API="http://127.0.0.1:18765";
-const fields=["base_url","translation_model","summary_model","whisper_model","whisper_model_path","model_install_dir","cuda_install_dir","whisper_download_source","device"];
+const fields=["base_url","translation_model","summary_model","whisper_model","whisper_model_path","model_install_dir","cuda_install_dir","whisper_download_source","device","shared_cache_url"];
 const KEY_PLACEHOLDER="••••••••";
 let modelPoll=null;
 let cudaPoll=null;
@@ -89,6 +89,9 @@ async function checkCuda({quiet=false}={}){
 
 ensureService().then(()=>request("/config")).then(async data=>{
   fields.forEach(id=>byId(id).value=data[id]??"");
+  shared_cache_enabled.checked=Boolean(data.shared_cache_enabled);
+  shared_state.textContent=data.shared_cache_enabled?"已启用":"未启用";
+  if(data.shared_cache_token_configured){shared_cache_token.value=KEY_PLACEHOLDER;shared_cache_token.dataset.configured="true";}
   if(data.api_key_configured){api_key.value=KEY_PLACEHOLDER;api_key.dataset.configured="true";}
   const stored=await chrome.storage.local.get({panelPrefs:{opacity:.94}});
   panel_opacity.value=Math.round((stored.panelPrefs?.opacity??.94)*100);opacity_value.value=`${panel_opacity.value}%`;
@@ -217,13 +220,36 @@ form.onsubmit=async event=>{
     await ensureService();
     const data=Object.fromEntries(fields.map(id=>[id,byId(id).value]));
     data.api_key=api_key.value===KEY_PLACEHOLDER?"":api_key.value;
+    data.shared_cache_enabled=shared_cache_enabled.checked;
+    data.shared_cache_token=shared_cache_token.value===KEY_PLACEHOLDER?"":shared_cache_token.value;
     const saved=await request("/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
     const stored=await chrome.storage.local.get({panelPrefs:{}});
     await chrome.storage.local.set({panelPrefs:{...stored.panelPrefs,opacity:Number(panel_opacity.value)/100}});
     message.textContent="已保存并应用";
     if(saved.api_key_configured){api_key.value=KEY_PLACEHOLDER;api_key.dataset.configured="true";}
+    if(saved.shared_cache_token_configured){shared_cache_token.value=KEY_PLACEHOLDER;shared_cache_token.dataset.configured="true";}
+    shared_state.textContent=saved.shared_cache_enabled?"已启用":"未启用";
     checkModel();
     checkCuda();
   }catch(error){message.textContent=`保存失败：${error.message}`;}
 };
 // Moon End
+
+shared_cache_token.onfocus=()=>{if(shared_cache_token.value===KEY_PLACEHOLDER)shared_cache_token.value="";};
+shared_cache_token.onblur=()=>{if(!shared_cache_token.value&&shared_cache_token.dataset.configured==="true")shared_cache_token.value=KEY_PLACEHOLDER;};
+test_shared_cache.onclick=async()=>{try{await ensureService();await request("/shared/test",{method:"POST"});shared_state.textContent="连接成功";}catch(error){shared_state.textContent=error.message;}};
+import_shared_cache.onclick=async()=>{try{await ensureService();await request("/shared/import",{method:"POST"});shared_state.textContent="正在导入";}catch(error){shared_state.textContent=error.message;}};
+cancel_shared_import.onclick=async()=>{try{await request("/shared/import/cancel",{method:"POST"});}catch(error){shared_state.textContent=error.message;}};
+setInterval(async()=>{
+  if(!serviceReady)return;
+  try{
+    const data=await request("/shared/status");const progress=data.import;
+    cancel_shared_import.hidden=progress.state!=="running";import_shared_cache.disabled=progress.state==="running";
+    if(progress.state!=="idle"){
+      const labels={running:"正在导入",completed:"导入完成",cancelled:"已取消",uploaded:"已上传",existing:"已存在",skipped:"已跳过",failed:"失败"};
+      shared_import_detail.textContent=`${labels[progress.state]||progress.state} · ${progress.done}/${progress.total} · 上传 ${progress.uploaded} · 已存在 ${progress.existing} · 跳过 ${progress.skipped} · 失败 ${progress.failed}\n`+progress.details.slice(-20).map(item=>`${item.file}: ${item.reason||labels[item.outcome]||item.outcome}`).join("\n");
+    }
+    if(data.pending)shared_state.textContent=`${data.pending} 个结果等待同步`;
+    else if(shared_state.textContent.includes("等待同步"))shared_state.textContent="同步完成";
+  }catch(_){}
+},2000);

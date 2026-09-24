@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,9 +29,23 @@ from .storage import (
 )
 from .prompts import ensure_prompt_file, prompt_path, restore_default_prompt
 from .diagnostics import LOG_DIR, log_event
+from .shared_routes import router as shared_router
 
 
-app = FastAPI(title="Video Bilingual Assistant", version="1.0.1")
+@asynccontextmanager
+async def lifespan(app):
+    from .shared_jobs import sync_loop
+    task = asyncio.create_task(sync_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="Video Bilingual Assistant", version="1.0.1", lifespan=lifespan)
+app.include_router(shared_router)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # Moon Add: active service/update installation root.
 
 
@@ -96,6 +112,11 @@ def clear_cache():
         if path.is_file():
             path.unlink()
             removed += 1
+    from .shared_client import SHARED_DIR
+    for directory in (SHARED_DIR / "results", SHARED_DIR / "aliases", SHARED_DIR / "outbox"):
+        for path in directory.glob("*.json"):
+            path.unlink(missing_ok=True)
+            removed += 1
     log_event("subtitle_cache_cleared", removed=removed)
     return {"ok": True, "removed": removed}
 
@@ -103,7 +124,8 @@ def clear_cache():
 @app.get("/config", response_model=PublicConfig)
 def get_config():
     cfg = load_config()
-    public = cfg.model_dump(exclude={"api_key"})
+    public = cfg.model_dump(exclude={"api_key", "shared_cache_token"})
+    public["shared_cache_token_configured"] = bool(cfg.shared_cache_token)
     public["model_install_dir"] = str(resolve_install_dir("model", cfg))
     public["cuda_install_dir"] = str(resolve_install_dir("cuda", cfg))
     return PublicConfig(**public, api_key_configured=bool(cfg.api_key))
@@ -116,12 +138,22 @@ def put_config(config: ServiceConfig):
     # Moon Add: an empty value means keeping the existing secret.
     if not config.api_key:
         config.api_key = load_config().api_key
+    if not config.shared_cache_token:
+        config.shared_cache_token = load_config().shared_cache_token
+    if config.shared_cache_enabled:
+        parsed = urlparse(config.shared_cache_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise HTTPException(400, "共享地址必须是无用户名和查询参数的 HTTP(S) 地址")
+        if not config.shared_cache_token:
+            raise HTTPException(400, "请配置共享缓存令牌")
+        if not config.shared_cache_token.isascii() or any(char.isspace() for char in config.shared_cache_token):
+            raise HTTPException(400, "共享缓存令牌必须为不含空白的 ASCII 字符")
     for value in (config.model_install_dir, config.cuda_install_dir):
         if value and not Path(value).expanduser().is_absolute():
             raise HTTPException(400, "安装位置必须是绝对路径")
     save_config(config)
     log_event("settings_saved", device=config.device, whisper_model=config.whisper_model)
-    return PublicConfig(**config.model_dump(exclude={"api_key"}), api_key_configured=bool(config.api_key))
+    return PublicConfig(**config.model_dump(exclude={"api_key", "shared_cache_token"}), api_key_configured=bool(config.api_key), shared_cache_token_configured=bool(config.shared_cache_token))
 
 
 @app.put("/config/whisper-model", response_model=PublicConfig)
@@ -132,7 +164,7 @@ def put_whisper_model(selection: WhisperModelSelection):
     config.whisper_model = selection.whisper_model
     save_config(config)
     log_event("whisper_model_selected", whisper_model=config.whisper_model)
-    return PublicConfig(**config.model_dump(exclude={"api_key"}), api_key_configured=bool(config.api_key))
+    return PublicConfig(**config.model_dump(exclude={"api_key", "shared_cache_token"}), api_key_configured=bool(config.api_key), shared_cache_token_configured=bool(config.shared_cache_token))
 
 
 @app.post("/jobs", response_model=JobView)

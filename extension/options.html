@@ -24,6 +24,17 @@
       <summary><h2>更多设置</h2></summary>
       <div class="details-body grid">
         <section class="wide settings-group">
+          <div class="group-head"><h3>共享缓存</h3><span id="shared_state" class="status-value">未启用</span></div>
+          <label><input id="shared_cache_enabled" type="checkbox" style="width:auto"> 在我的电脑之间共享字幕结果</label>
+          <small>共享原文、译文和摘要，不上传音频、Cookie 或模型 API Key。请先保存设置，再测试连接或导入。</small>
+          <div class="group-fields">
+            <div class="wide"><label for="shared_cache_url">私有缓存服务地址</label><input id="shared_cache_url" placeholder="https://cache.example.com"></div>
+            <div class="wide"><label for="shared_cache_token">访问令牌</label><input id="shared_cache_token" type="password" autocomplete="off" placeholder="留空保留已有令牌"></div>
+          </div>
+          <div class="actions"><button type="button" id="test_shared_cache" class="secondary">测试连接</button><button type="button" id="import_shared_cache" class="secondary">导入已有缓存</button><button type="button" id="cancel_shared_import" class="secondary" hidden>取消导入</button></div>
+          <pre id="shared_import_detail" style="white-space:pre-wrap;max-height:180px;overflow:auto" aria-live="polite"></pre>
+        </section>
+        <section class="wide settings-group">
           <div class="group-head"><h3>Whisper 模型</h3><span id="model_state" class="status-value">尚未检查</span></div>
           <div class="core-field"><label for="whisper_model">模型</label><select id="whisper_model"><option value="tiny">tiny</option><option value="base">base</option><option value="small" selected>small</option><option value="medium">medium</option></select></div>
           <div id="model_progress" class="progress" hidden><i id="model_bar"></i></div>

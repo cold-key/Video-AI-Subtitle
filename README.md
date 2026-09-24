@@ -61,6 +61,12 @@ Open a supported video, click the extension, then select **Process Current Video
 
 ## Captions and transcription
 
+### Share processed videos across your computers (optional)
+
+Deploy the private cache service on your server or NAS, then enable **Settings → More settings → Shared cache** with its URL and access token. **Import existing cache** uploads validated complete results. Other computers reuse subtitles, translations and summaries; concurrent first-time requests choose one processing computer while the others wait.
+
+Sharing is off by default. The server stores text results and checkpoints, never audio, cookies or model API keys. If it is offline and there is no local result, the job waits unless you explicitly choose local processing, which may duplicate model costs. See [deployment, backup and usage instructions](shared_cache/README.md).
+
 | Priority | Source | Notes |
 |---|---|---|
 | 1 | Platform captions | Uses the video’s available English, Japanese, Korean, or Chinese caption tracks. |

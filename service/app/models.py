@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 class ServiceConfig(BaseModel):
+    shared_cache_enabled: bool = False
+    shared_cache_url: str = ""
+    shared_cache_token: str = ""
     base_url: str = ""
     api_key: str = ""
     translation_model: str = "deepseek-v4-flash"
@@ -21,6 +24,9 @@ class ServiceConfig(BaseModel):
 
 
 class PublicConfig(BaseModel):
+    shared_cache_enabled: bool = False
+    shared_cache_url: str = ""
+    shared_cache_token_configured: bool = False
     base_url: str
     translation_model: str
     summary_model: str
@@ -133,6 +139,10 @@ class ProcessedVideo(BaseModel):
 
 
 class JobView(BaseModel):
+    cache_origin: str = ""
+    shared_state: str = ""
+    needs_subtitles: bool = False
+    sync_error: str = ""
     id: str
     state: Literal["queued", "running", "paused", "completed", "failed", "cancelled"]
     stage: str

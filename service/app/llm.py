@@ -18,6 +18,7 @@ class LlmClient:
         self.client = httpx.AsyncClient(timeout=180)
         self._prefer_chat = False  # Moon Add: remember a gateway's working compatibility route.
         self.diagnostic_id = ""
+        self.request_guard = None
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -28,6 +29,8 @@ class LlmClient:
         transient_statuses = {408, 429, 500, 502, 503, 504}
         last_error: Exception | None = None
         for attempt in range(max_attempts):
+            if self.request_guard:
+                await self.request_guard()
             started = time.monotonic()
             try:
                 response = await self.client.post(url, **kwargs)
@@ -111,6 +114,8 @@ class LlmClient:
         headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
         base = self.config.base_url.rstrip("/")
         accumulated = []
+        if self.request_guard:
+            await self.request_guard()
         async with self.client.stream(
             "POST", f"{base}/chat/completions",
             headers=headers,

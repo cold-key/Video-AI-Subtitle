@@ -565,6 +565,21 @@
     pause.hidden=!active;cancel.hidden=!active;
     pause.textContent=job?.state==="paused"?"继续":"暂停";
     pause.classList.toggle("active",job?.state==="paused");
+    let local=root.querySelector("[data-shared-local]");
+    if(!local){
+      local=document.createElement("button");local.dataset.sharedLocal="";local.textContent="仅本机处理";
+      local.onclick=async()=>{if(!confirm("共享服务不可用时，本机处理可能与其他电脑重复消耗模型额度。继续？"))return;try{if(job)await api(`/jobs/${job.id}/cancel`,{method:"POST"});clearTimeout(pollTimer);await start({localOnly:true});}catch(error){updateStatus("启动失败",0,error.message);}};
+      cancel.parentElement.appendChild(local);
+    }
+    local.hidden=job?.shared_state!=="offline";
+    let regenerate=root.querySelector("[data-shared-regenerate]");
+    if(!regenerate){
+      regenerate=document.createElement("button");regenerate.dataset.sharedRegenerate="";regenerate.textContent="重新生成共享结果";
+      regenerate.className="ytba-control";
+      regenerate.onclick=()=>{if(confirm("重新处理会再次调用模型，成功后替换共享结果。继续？"))start({regenerate:true});};
+      root.querySelector(".ytba-tools-popover").appendChild(regenerate);
+    }
+    regenerate.hidden=!(job?.state==="completed"&&job?.shared_state);
   }
 
   async function toggleJobPause(){
@@ -581,7 +596,58 @@
   }
   // Moon End
 
-  async function start() {
+  let sharedVideoUrl="";
+  let submittingSharedCaptions=false;
+  let startingJob=false;
+
+  async function cancelAbandonedSharedJob(){
+    if(job?.shared_state&&["queued","running","paused"].includes(job.state)){
+      await api(`/jobs/${job.id}/cancel`,{method:"POST",keepalive:true}).catch(()=>{});
+    }
+  }
+
+  async function trySharedJob(options={}){
+    const config=await api("/config");
+    if(!config.shared_cache_enabled)return null;
+    const url=location.href;
+    let identity;
+    if(site==="bilibili"){
+      const resolved=await safeSendMessage({type:"resolve-bilibili-resource",url});
+      if(resolved?.identity){identity={platform:"bilibili",video_id:resolved.identity.bvid,cid:resolved.identity.cid};}
+      else{
+        const saved=await api("/shared/local-lookup",{method:"POST",body:JSON.stringify({url})});
+        identity=saved.identity;
+        if(!identity)throw new Error("无法确认视频身份，且本机无已关联缓存；请稍后重试");
+        if(options.regenerate)throw new Error("重新生成需要先确认当前视频身份");
+      }
+    }else{
+      identity={platform:"youtube",video_id:new URL(url).searchParams.get("v"),cid:0};
+    }
+    if(location.href!==url)throw new Error("视频已切换，请在当前视频重新开始");
+    sharedVideoUrl=url;
+    return api("/shared/jobs",{method:"POST",body:JSON.stringify({url,identity,local_only:Boolean(options.localOnly),regenerate:Boolean(options.regenerate)})});
+  }
+
+  async function submitSharedCaptions(){
+    if(submittingSharedCaptions)return;
+    submittingSharedCaptions=true;
+    const activeId=job.id;
+    try{
+      if(location.href!==sharedVideoUrl)throw new Error("视频已切换，请重新开始");
+      const lookup=await resolveCurrentBilibiliSubtitles(sharedVideoUrl);
+      if(lookup.urlSnapshot!==sharedVideoUrl)throw new Error("视频已切换，请重新开始");
+      const value=lookup.result;ensureUsableBilibiliLookup(value);
+      await api(`/shared/jobs/${activeId}/subtitles`,{method:"POST",body:JSON.stringify({url:sharedVideoUrl,page_subtitles:value.segments,page_subtitle_language:value.language,page_subtitle_identity:value.identity,page_subtitle_status:value.status,page_subtitle_provenance:value.provenance})});
+    }catch(error){
+      await api(`/jobs/${activeId}/cancel`,{method:"POST"}).catch(()=>{});
+      throw error;
+    }finally{submittingSharedCaptions=false;}
+  }
+
+  async function start(options={}) {
+    if(startingJob)return;
+    startingJob=true;
+    clearTimeout(pollTimer);
     // Moon Add: only an explicit start action may reopen a dismissed assistant.
     assistantDismissed=false;
     resetCompletionNotice();
@@ -592,9 +658,15 @@
     ensurePanel();
     resetCompletionNotice();
     try {
+      await cancelAbandonedSharedJob();
       updateStatus("正在启动本机服务", 2);
       await ensureService();
       if(assistantDismissed){releaseService().catch(()=>{});return;}
+      const shared=await trySharedJob(options);
+      if(shared){
+        if(assistantDismissed){await api(`/jobs/${shared.id}/cancel`,{method:"POST"});releaseService();return;}
+        job=shared;poll();return;
+      }
       const lookup=await resolveCurrentBilibiliSubtitles(location.href);
       const pageSubtitles=lookup.result;
       await logBilibiliLookup(pageSubtitles);
@@ -604,9 +676,12 @@
       job=createdJob;
       poll();
     } catch (error) { releaseService(); updateStatus("无法启动", 0, error.message); }
+    finally { startingJob=false; }
   }
 
   async function retryFromCheckpoint() {
+    if(startingJob)return;
+    startingJob=true;
     // Moon Add: terminate a stale native session, then create a job that resumes its checkpoint.
     clearTimeout(pollTimer);
     resetCompletionNotice();
@@ -614,6 +689,7 @@
     if(button)button.disabled=true;
     updateStatus("正在读取上次进度…",2);
     try {
+      await cancelAbandonedSharedJob();
       await releaseService();
       await new Promise(resolve=>setTimeout(resolve,350));
       if(assistantDismissed)return;
@@ -626,6 +702,11 @@
       summaryComplete=false;
       await ensureService();
       if(assistantDismissed){releaseService().catch(()=>{});return;}
+      const shared=await trySharedJob();
+      if(shared){
+        if(assistantDismissed){await api(`/jobs/${shared.id}/cancel`,{method:"POST"});releaseService();return;}
+        job=shared;poll();return;
+      }
       const lookup=await resolveCurrentBilibiliSubtitles(location.href);
       const pageSubtitles=lookup.result;
       await logBilibiliLookup(pageSubtitles);
@@ -637,15 +718,21 @@
     } catch(error) {
       updateStatus("重试失败",0,error.message);
     } finally {
+      startingJob=false;
       if(button)button.disabled=false;
     }
   }
 
   async function poll() {
+    const polledJobId=job?.id;
+    const polledUrl=location.href;
+    if(!polledJobId)return;
     try {
       const latestJob = await api(`/jobs/${job.id}`);
-      if(assistantDismissed)return;
+      if(assistantDismissed||job?.id!==polledJobId||location.href!==polledUrl)return;
       job=latestJob;
+      if(job.needs_subtitles)await submitSharedCaptions();
+      if(job?.id!==polledJobId||location.href!==polledUrl)return;
       refreshTaskControls();
       const liveStage = job.translated_segments > 0 && job.state === "running"
         ? `已翻译 ${job.translated_segments} / ${job.total_segments}，可继续观看`
@@ -692,7 +779,7 @@
         const root = ensurePanel();
         root.classList.add("ytba-completed");
         const playButton=root.querySelector("[data-play-completed]");
-        root.querySelector("[data-status]").textContent=`${result.segments.length} / ${result.segments.length} 翻译完成`;
+        root.querySelector("[data-status]").textContent=job.shared_state||job.cache_origin?`${job.stage}${job.sync_error?" · "+job.sync_error:""}`:`${result.segments.length} / ${result.segments.length} 翻译完成`;
         playButton.hidden=completionNoticeDismissed;
         root.querySelector(".ytba-status").hidden=completionNoticeDismissed;
         safeSendMessage({type:"notify", message:`《${result.title}》处理完成。`});
@@ -838,7 +925,10 @@
 
   function watchNavigation() {
     if (location.href === lastUrl) return;
-    if(lastUrl&&job?.state==="running")releaseService().catch(()=>{});
+    if(lastUrl){
+      cancelAbandonedSharedJob().catch(()=>{});
+      if(job&&["queued","running","paused"].includes(job.state))releaseService().catch(()=>{});
+    }
     lastUrl = location.href;
     const player = video();
     if (player && playbackReady) player.removeEventListener("timeupdate", syncSubtitle);
@@ -849,6 +939,7 @@
   }
 
   chrome.runtime.onMessage.addListener(message => { if (message.type === "start") start(); if (message.type === "open"&&!assistantDismissed) ensurePanel(); });
+  window.addEventListener("pagehide",()=>{cancelAbandonedSharedJob().catch(()=>{});releaseService().catch(()=>{});});
   // Moon Add: apply settings-page appearance changes without reloading the video.
   chrome.storage.onChanged.addListener((changes,area)=>{if(area==="local"&&changes.panelPrefs){panelPrefs={...defaultPanelPrefs,...changes.panelPrefs.newValue};panelPrefs.layoutMode=panelPrefs.layoutMode||panelPrefs.fullscreenMode||"overlay";applyPanelPrefs();}});
   document.addEventListener("fullscreenchange",updateFullscreenLayout);

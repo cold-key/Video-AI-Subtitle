@@ -55,7 +55,7 @@ def test_idle_bilibili_launcher_hides_during_fullscreen_playback():
 def test_starting_processing_does_not_pause_or_rewind_video():
     # Moon Add: extraction, translation and summarization must coexist with playback.
     script = (Path(__file__).parents[1] / "extension" / "content.js").read_text(encoding="utf-8")
-    start_body = script.split("async function start()", 1)[1].split("async function retryFromCheckpoint()", 1)[0]
+    start_body = script.split("async function start(", 1)[1].split("async function retryFromCheckpoint()", 1)[0]
     assert ".pause()" not in start_body
     assert ".currentTime = 0" not in start_body
 

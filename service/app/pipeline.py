@@ -146,8 +146,13 @@ class JobControl:
         self.resume_event.set()
         self.cancelled = False
         self.previous_stage = ""
+        self.shared_guard = None
+        self.state_event = asyncio.Event()
+        self.shared_stop_event: threading.Event | None = None
 
     async def checkpoint(self) -> None:
+        if self.shared_guard:
+            await self.shared_guard()
         if self.cancelled:
             raise asyncio.CancelledError
         await self.resume_event.wait()
@@ -335,13 +340,17 @@ def _clear_partial_audio(directory: Path) -> None:
             path.unlink(missing_ok=True)
 
 
-def _download(url: str, directory: Path) -> tuple[dict, list[Segment], Path | None]:
+def _download(url: str, directory: Path, cancel_event: threading.Event | None = None) -> tuple[dict, list[Segment], Path | None]:
+    _raise_if_cancelled(cancel_event)
     common = {"quiet": True, "no_warnings": True, "noplaylist": True, "paths": {"home": str(directory)}}
+    if cancel_event is not None:
+        common["progress_hooks"] = [lambda _: _raise_if_cancelled(cancel_event)]
     with yt_dlp.YoutubeDL(common) as ydl:
         info = ydl.extract_info(url, download=False)
     captions = {**(info.get("automatic_captions", {}) or {}), **(info.get("subtitles", {}) or {})}
     selected = _select_caption(captions) if platform_from_url(url) != "bilibili" else None
     if selected:
+        _raise_if_cancelled(cancel_event)
         subtitle_key, language = selected
         options = common | {
             "skip_download": True,
@@ -374,6 +383,7 @@ def _download(url: str, directory: Path) -> tuple[dict, list[Segment], Path | No
         "concurrent_fragment_downloads": 1,
     }
     for attempt in range(3):
+        _raise_if_cancelled(cancel_event)
         try:
             _clear_partial_audio(directory)
             with yt_dlp.YoutubeDL(options) as ydl:
@@ -746,6 +756,7 @@ async def process_job(
     job_id: str, url: str, page_subtitles: list[Segment] | None = None,
     page_subtitle_language: str | None = None, page_subtitle_cid: int | None = None,
     page_subtitle_provenance: dict | None = None,
+    cache_key_override: str | None = None,
 ) -> None:
     job = JOBS[job_id]
     control = JOB_CONTROLS.setdefault(job_id, JobControl())  # Moon Add
@@ -757,6 +768,7 @@ async def process_job(
         # Moon Add: keep the official resource CID as cache metadata instead of
         # mutating the user-visible URL with a self-authored query parameter.
         cache_key = f"{cache_key}_cid{page_subtitle_cid}"
+    cache_key = cache_key_override or cache_key
     cache_path = CACHE_DIR / f"{cache_key}.v{CACHE_SCHEMA_VERSION}.json"
     provenance = page_subtitle_provenance or {}
     trace_context = {
@@ -841,6 +853,7 @@ async def process_job(
         temp.mkdir(parents=True, exist_ok=True)
         try:
             job.state, job.stage, job.progress = "running", "读取视频信息与字幕", 8
+            await control.checkpoint()
             # Moon Modified: Bilibili page captions are accepted only after the extension
             # resolves the URL's own BVID/part (or EP) to a CID via the official API.
             if platform == "bilibili" and page_subtitles:
@@ -851,11 +864,13 @@ async def process_job(
                 job.stage, job.progress = "已读取 B 站当前视频字幕", 50
                 info, audio = {"title": video_id, "duration": None}, None
             else:
-                info, extracted, audio = await asyncio.to_thread(_download, url, temp)
+                download_args = (url, temp, control.shared_stop_event) if control.shared_stop_event is not None else (url, temp)
+                info, extracted, audio = await asyncio.to_thread(_download, *download_args)
                 await control.checkpoint()
                 source = info.get("_ytba_source", f"{platform}_subtitles")
                 source_language = info.get("_ytba_language", "en")
             if not extracted:
+                await control.checkpoint()
                 config = load_config()
                 # Moon Begin: distinguish first-run model download from transcription.
                 def human_size(value: float) -> str:
@@ -988,6 +1003,7 @@ async def process_job(
 
     config = load_config()
     client = LlmClient(config)
+    client.request_guard = control.checkpoint
     # Moon Add: correlate privacy-safe LLM timing logs with the owning video job.
     client.diagnostic_id = job_id
     try:
@@ -1134,6 +1150,9 @@ def pause_job(job_id: str) -> JobView:
         return job
     control.previous_stage = job.stage
     control.resume_event.clear()
+    control.state_event.set()
+    if control.shared_stop_event is not None:
+        control.shared_stop_event.set()
     job.state, job.stage = "paused", "已暂停（当前识别步骤结束后生效）"
     log_event("job_paused", job_id=job_id)
     return job
@@ -1145,6 +1164,7 @@ def resume_job(job_id: str) -> JobView:
         return job
     job.state, job.stage = "running", control.previous_stage or "继续处理"
     control.resume_event.set()
+    control.state_event.set()
     log_event("job_resumed", job_id=job_id)
     return job
 
@@ -1155,6 +1175,9 @@ def cancel_job(job_id: str) -> JobView:
         return job
     control.cancelled = True
     control.resume_event.set()
+    control.state_event.set()
+    if control.shared_stop_event is not None:
+        control.shared_stop_event.set()
     # Moon Modified: stop at the next safe checkpoint. Force-cancelling a worker
     # thread can leave curl writing into the model path after cleanup begins.
     job.state, job.stage, job.error = "cancelled", "任务已取消，进度已保留", None
