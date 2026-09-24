@@ -15,6 +15,10 @@ foreach ($Directory in @("extension", "service", "scripts")) {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot $Directory) -Destination (Join-Path $StagePath $Directory) -Recurse -Force
 }
 Get-ChildItem -LiteralPath (Join-Path $StagePath "service") -Directory -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $StagePath "shared_cache") | Out-Null
+foreach ($File in @("__init__.py", "server.py", "requirements.txt", "Dockerfile", "Dockerfile.dockerignore", "compose.yaml", "README.md")) {
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot "shared_cache\$File") -Destination (Join-Path $StagePath "shared_cache\$File") -Force
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $StagePath "native-host") | Out-Null
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "native-host\Program.cs") -Destination (Join-Path $StagePath "native-host\Program.cs") -Force
 foreach ($File in @("requirements.txt", "README.md", "README_zh.md", "LICENSE", ".gitignore")) {
