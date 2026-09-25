@@ -763,18 +763,9 @@ def _transcribe(
 def _align_whisper_segments(
     segments: list[Segment], audio_duration: float | None, video_duration: float | None,
 ) -> tuple[list[Segment], float, bool]:
-    """Map Whisper timestamps to the player timeline only when measured durations differ."""
-    if not audio_duration or not video_duration:
-        return segments, 1.0, False
-    if not math.isfinite(audio_duration) or not math.isfinite(video_duration):
-        return segments, 1.0, False
-    if audio_duration <= 0 or video_duration <= 0:
-        return segments, 1.0, False
-    scale = video_duration / audio_duration
-    if abs(scale - 1.0) <= 0.005:
-        return segments, 1.0, False
-    # A larger mismatch is more likely a bad duration/source pairing than a clock drift.
-    if not 0.9 <= scale <= 1.1:
+    """Map Whisper timestamps to the player timeline for credible duration drift."""
+    scale, applied = _whisper_timing_scale(audio_duration, video_duration)
+    if not applied:
         return segments, scale, False
     return [
         segment.model_copy(update={"start": segment.start * scale, "end": segment.end * scale})
@@ -782,11 +773,66 @@ def _align_whisper_segments(
     ], scale, True
 
 
+def _whisper_timing_scale(
+    audio_duration: float | None, video_duration: float | None,
+) -> tuple[float, bool]:
+    if not audio_duration or not video_duration:
+        return 1.0, False
+    if not math.isfinite(audio_duration) or not math.isfinite(video_duration):
+        return 1.0, False
+    if audio_duration <= 0 or video_duration <= 0:
+        return 1.0, False
+    scale = video_duration / audio_duration
+    difference = abs(scale - 1.0)
+    if difference <= 0.0005 + 1e-12:
+        return 1.0, False
+    # A large mismatch is more likely a bad duration/source pairing than clock drift.
+    if difference > 0.05 + 1e-12:
+        return scale, False
+    return scale, True
+
+
+def _scale_whisper_segments(segments: list[Segment], scale: float) -> list[Segment]:
+    return [
+        segment.model_copy(update={"start": segment.start * scale, "end": segment.end * scale})
+        for segment in segments
+    ]
+
+
+def _preview_whisper_timing_scale(
+    audio_duration: float | None, video_duration: float | None,
+) -> float:
+    scale, applied = _whisper_timing_scale(audio_duration, video_duration)
+    return scale if applied else 1.0
+
+
+def _select_bilibili_timing_reference(
+    playback_duration: float | None,
+    page_duration: float | None,
+    metadata_duration: float | None,
+) -> tuple[float | None, str]:
+    """Prefer the duration of the exact player timeline, then verified part metadata."""
+    for source, value in (
+        ("player", playback_duration),
+        ("page_api", page_duration),
+        ("yt_dlp", metadata_duration),
+    ):
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            return duration, source
+    return None, "unavailable"
+
+
 async def process_job(
     job_id: str, url: str, page_subtitles: list[Segment] | None = None,
     page_subtitle_language: str | None = None, page_subtitle_cid: int | None = None,
     page_subtitle_provenance: dict | None = None,
     cache_key_override: str | None = None,
+    playback_duration: float | None = None,
+    page_duration: float | None = None,
 ) -> None:
     job = JOBS[job_id]
     control = JOB_CONTROLS.setdefault(job_id, JobControl())  # Moon Add
@@ -850,6 +896,7 @@ async def process_job(
     title: str = video_id
     duration: float | None = None
     audio_duration: float | None = None
+    preview_timing_scale = 1.0
     subtitle_timing_version = 0
     source: str = ""
     source_language: str = "en"
@@ -957,12 +1004,19 @@ async def process_job(
                 def report_transcription_timing(
                     measured_audio_duration: float, duration_after_vad: float,
                 ) -> None:
-                    nonlocal audio_duration
+                    nonlocal audio_duration, preview_timing_scale
                     audio_duration = (
                         measured_audio_duration
                         if math.isfinite(measured_audio_duration) and measured_audio_duration > 0
                         else None
                     )
+                    if platform == "bilibili":
+                        reference_duration, _ = _select_bilibili_timing_reference(
+                            playback_duration, page_duration, info.get("duration"),
+                        )
+                        preview_timing_scale = _preview_whisper_timing_scale(
+                            audio_duration, reference_duration,
+                        )
                     if not math.isfinite(duration_after_vad) or duration_after_vad < 0:
                         duration_after_vad = 0.0
                     log_event(
@@ -979,7 +1033,10 @@ async def process_job(
                 ) -> None:
                     # Moon Modified: expose and persist each recognized source
                     # segment so a terminated service can resume from it.
-                    job.preview_segments = recognized
+                    display_segments = recognized
+                    if platform == "bilibili" and preview_timing_scale != 1.0:
+                        display_segments = _scale_whisper_segments(recognized, preview_timing_scale)
+                    job.preview_segments = display_segments
                     job.recognized_segments = len(recognized)
                     job.source_language = language
                     job.source = "whisper"
@@ -1014,14 +1071,19 @@ async def process_job(
             if not extracted:
                 raise RuntimeError("未识别到有效字幕或语音")
             if platform == "bilibili" and source == "whisper":
+                timing_reference_duration, timing_reference_source = _select_bilibili_timing_reference(
+                    playback_duration, page_duration, info.get("duration"),
+                )
                 extracted, timing_scale, timing_scale_applied = _align_whisper_segments(
-                    extracted, audio_duration, info.get("duration"),
+                    extracted, audio_duration, timing_reference_duration,
                 )
                 subtitle_timing_version = BILIBILI_WHISPER_TIMING_VERSION
                 log_event(
                     "whisper_timeline_aligned",
                     job_id=job_id,
                     video_duration=info.get("duration"),
+                    reference_duration=timing_reference_duration,
+                    reference_source=timing_reference_source,
                     audio_duration=audio_duration,
                     timing_scale=timing_scale,
                     scale_applied=timing_scale_applied,
@@ -1190,12 +1252,18 @@ async def _run_job(
     job_id: str, url: str, page_subtitles: list[Segment] | None = None,
     page_subtitle_language: str | None = None, page_subtitle_cid: int | None = None,
     page_subtitle_provenance: dict | None = None,
+    playback_duration: float | None = None,
+    page_duration: float | None = None,
 ) -> None:
     """Keep cancellation visible instead of leaving a stale running job."""
     # Moon Begin
     try:
         log_event("job_started", job_id=job_id, platform=platform_from_url(url))
-        await process_job(job_id, url, page_subtitles, page_subtitle_language, page_subtitle_cid, page_subtitle_provenance)
+        await process_job(
+            job_id, url, page_subtitles, page_subtitle_language, page_subtitle_cid,
+            page_subtitle_provenance, playback_duration=playback_duration,
+            page_duration=page_duration,
+        )
         result = JOBS[job_id].result
         log_event("job_completed", job_id=job_id, state=JOBS[job_id].state, source=result.source if result else "")
     except asyncio.CancelledError:
@@ -1219,13 +1287,18 @@ def create_job(
     url: str, page_subtitles: list[Segment] | None = None,
     page_subtitle_language: str | None = None, page_subtitle_cid: int | None = None,
     page_subtitle_provenance: dict | None = None,
+    playback_duration: float | None = None,
+    page_duration: float | None = None,
 ) -> JobView:
     job_id = uuid.uuid4().hex
     job = JobView(id=job_id, state="queued", stage="等待处理", progress=0)
     JOBS[job_id] = job
     JOB_CONTROLS[job_id] = JobControl()
     JOB_TASKS[job_id] = asyncio.create_task(
-        _run_job(job_id, url, page_subtitles, page_subtitle_language, page_subtitle_cid, page_subtitle_provenance)
+        _run_job(
+            job_id, url, page_subtitles, page_subtitle_language, page_subtitle_cid,
+            page_subtitle_provenance, playback_duration, page_duration,
+        )
     )
     log_event(
         "job_created", job_id=job_id, platform=platform_from_url(url),

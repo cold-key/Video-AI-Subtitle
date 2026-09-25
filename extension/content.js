@@ -77,6 +77,12 @@
     return visible.sort((left,right)=>playerScore(right)-playerScore(left))[0]||candidates.find(player=>player.isConnected)||null;
   }
 
+  function playbackDuration() {
+    if(site!=="bilibili")return null;
+    const duration=video()?.duration;
+    return Number.isFinite(duration)&&duration>0?duration:null;
+  }
+
   function playerContainer(player=video()) {
     if(!player)return null;
     return site==="bilibili"
@@ -710,7 +716,7 @@
       const lookup=await resolveCurrentBilibiliSubtitles(sharedVideoUrl);
       if(lookup.urlSnapshot!==sharedVideoUrl)throw new Error("视频已切换，请重新开始");
       const value=lookup.result;ensureUsableBilibiliLookup(value);
-      await api(`/shared/jobs/${activeId}/subtitles`,{method:"POST",body:JSON.stringify({url:sharedVideoUrl,page_subtitles:value.segments,page_subtitle_language:value.language,page_subtitle_identity:value.identity,page_subtitle_status:value.status,page_subtitle_provenance:value.provenance})});
+      await api(`/shared/jobs/${activeId}/subtitles`,{method:"POST",body:JSON.stringify({url:sharedVideoUrl,page_subtitles:value.segments,page_subtitle_language:value.language,page_subtitle_identity:value.identity,page_subtitle_status:value.status,page_subtitle_provenance:value.provenance,playback_duration:playbackDuration()})});
     }catch(error){
       await api(`/jobs/${activeId}/cancel`,{method:"POST"}).catch(()=>{});
       throw error;
@@ -744,7 +750,7 @@
       const pageSubtitles=lookup.result;
       await logBilibiliLookup(pageSubtitles);
       ensureUsableBilibiliLookup(pageSubtitles);
-      const createdJob = await api("/jobs", {method:"POST", body:JSON.stringify({url:lookup.urlSnapshot,page_subtitles:pageSubtitles.segments,page_subtitle_language:pageSubtitles.language,page_subtitle_identity:pageSubtitles.identity,page_subtitle_status:pageSubtitles.status,page_subtitle_provenance:pageSubtitles.provenance})});
+      const createdJob = await api("/jobs", {method:"POST", body:JSON.stringify({url:lookup.urlSnapshot,page_subtitles:pageSubtitles.segments,page_subtitle_language:pageSubtitles.language,page_subtitle_identity:pageSubtitles.identity,page_subtitle_status:pageSubtitles.status,page_subtitle_provenance:pageSubtitles.provenance,playback_duration:playbackDuration()})});
       if(assistantDismissed){api(`/jobs/${createdJob.id}/cancel`,{method:"POST"}).catch(()=>{});releaseService().catch(()=>{});return;}
       job=createdJob;
       poll();
@@ -784,7 +790,7 @@
       const pageSubtitles=lookup.result;
       await logBilibiliLookup(pageSubtitles);
       ensureUsableBilibiliLookup(pageSubtitles);
-      const createdJob=await api("/jobs",{method:"POST",body:JSON.stringify({url:lookup.urlSnapshot,page_subtitles:pageSubtitles.segments,page_subtitle_language:pageSubtitles.language,page_subtitle_identity:pageSubtitles.identity,page_subtitle_status:pageSubtitles.status,page_subtitle_provenance:pageSubtitles.provenance})});
+      const createdJob=await api("/jobs",{method:"POST",body:JSON.stringify({url:lookup.urlSnapshot,page_subtitles:pageSubtitles.segments,page_subtitle_language:pageSubtitles.language,page_subtitle_identity:pageSubtitles.identity,page_subtitle_status:pageSubtitles.status,page_subtitle_provenance:pageSubtitles.provenance,playback_duration:playbackDuration()})});
       if(assistantDismissed){api(`/jobs/${createdJob.id}/cancel`,{method:"POST"}).catch(()=>{});releaseService().catch(()=>{});return;}
       job=createdJob;
       poll();

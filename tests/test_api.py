@@ -100,7 +100,7 @@ def test_start_job_runs_on_event_loop(monkeypatch):
     # Moon Add: regress the missing event loop failure from a synchronous endpoint.
     captured = {}
 
-    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None):
+    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None, playback_duration=None, page_duration=None):
         import asyncio
 
         captured["loop_was_running"] = asyncio.get_running_loop().is_running()
@@ -124,24 +124,26 @@ def test_start_job_runs_on_event_loop(monkeypatch):
 def test_start_job_accepts_bilibili(monkeypatch):
     # Moon Add
     observed = {}
-    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None):
-        observed.update(subtitles=page_subtitles, language=page_subtitle_language, cid=page_subtitle_cid)
+    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None, playback_duration=None, page_duration=None):
+        observed.update(subtitles=page_subtitles, language=page_subtitle_language, cid=page_subtitle_cid, playback_duration=playback_duration, page_duration=page_duration)
         return JobView(id="bilibili-job", state="queued", stage="等待处理", progress=0, platform="bilibili")
     monkeypatch.setattr(main, "create_job", fake_create_job)
     response = TestClient(app).post(
-        "/jobs", json={"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "page_subtitle_status":"found", "page_subtitle_language":"en", "page_subtitle_identity":{"bvid":"BV1GJ411x7h7","cid":987654,"duration":2}, "page_subtitles":[{"start":0,"end":2,"en":"Hello","source_language":"en"}]}
+        "/jobs", json={"url": "https://www.bilibili.com/video/BV1GJ411x7h7", "page_subtitle_status":"found", "page_subtitle_language":"en", "page_subtitle_identity":{"bvid":"BV1GJ411x7h7","cid":987654,"duration":2}, "page_subtitles":[{"start":0,"end":2,"en":"Hello","source_language":"en"}], "playback_duration":2.1}
     )
     assert response.status_code == 200
     assert response.json()["platform"] == "bilibili"
     assert observed["language"] == "en"
     assert observed["cid"] == 987654
+    assert observed["playback_duration"] == 2.1
+    assert observed["page_duration"] == 2
     assert observed["subtitles"][0].en == "Hello"
 
 
 def test_start_job_rejects_inconclusive_bilibili_lookup(monkeypatch):
     # Moon Modified: inconclusive lookup must not be misreported as no subtitles.
     observed = {}
-    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None):
+    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None, playback_duration=None, page_duration=None):
         observed.update(subtitles=page_subtitles, language=page_subtitle_language)
         return JobView(id="bilibili-job", state="queued", stage="等待处理", progress=0, platform="bilibili")
     monkeypatch.setattr(main, "create_job", fake_create_job)
@@ -155,15 +157,17 @@ def test_start_job_rejects_inconclusive_bilibili_lookup(monkeypatch):
 def test_start_job_allows_whisper_only_after_bilibili_confirms_no_tracks(monkeypatch):
     # Moon Add
     observed = {}
-    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None):
-        observed.update(subtitles=page_subtitles, language=page_subtitle_language)
+    def fake_create_job(url, page_subtitles=None, page_subtitle_language=None, page_subtitle_cid=None, page_subtitle_provenance=None, playback_duration=None, page_duration=None):
+        observed.update(subtitles=page_subtitles, language=page_subtitle_language, playback_duration=playback_duration, page_duration=page_duration)
         return JobView(id="bilibili-job", state="queued", stage="等待处理", progress=0, platform="bilibili")
     monkeypatch.setattr(main, "create_job", fake_create_job)
     response = TestClient(app).post(
-        "/jobs", json={"url":"https://www.bilibili.com/video/BV1GJ411x7h7","page_subtitle_status":"no_tracks","page_subtitles":[]}
+        "/jobs", json={"url":"https://www.bilibili.com/video/BV1GJ411x7h7","page_subtitle_status":"no_tracks","page_subtitle_identity":{"bvid":"BV1GJ411x7h7","cid":987654,"duration":10},"page_subtitles":[],"playback_duration":9.8}
     )
     assert response.status_code == 200
     assert observed["subtitles"] == []
+    assert observed["playback_duration"] == 9.8
+    assert observed["page_duration"] == 10
 
 
 def test_clear_cache_preserves_config(tmp_path, monkeypatch):

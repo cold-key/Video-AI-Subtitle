@@ -286,6 +286,11 @@ async def run_shared_job(job_id):
                     request.identity.cid if captions and captions.page_subtitles else None,
                     captions.page_subtitle_provenance.model_dump() if captions and captions.page_subtitle_provenance else None,
                     cache_key_override=work_key,
+                    playback_duration=captions.playback_duration if captions else None,
+                    page_duration=(
+                        captions.page_subtitle_identity.duration
+                        if captions and captions.page_subtitle_identity else None
+                    ),
                 )
                 await guard()
                 # Keep the native service lease until result/checkpoint upload

@@ -24,7 +24,7 @@ const result={video_id:'BV1test123',title:'共享字幕测试',url:location.href
 window.installTestVideoState=(video,time)=>{
   Object.defineProperties(video,{
     paused:{configurable:true,get:()=>false},ended:{configurable:true,get:()=>false},
-    readyState:{configurable:true,get:()=>4},duration:{configurable:true,get:()=>2},
+    readyState:{configurable:true,get:()=>4},duration:{configurable:true,get:()=>location.hostname.includes('bilibili.com')?2.02:2},
     currentTime:{configurable:true,get:()=>video._testTime||0,set:value=>{video._testTime=value;}},
   });
   video.currentTime=time;
@@ -104,7 +104,7 @@ try{
     assert.deepEqual(await evaluate('testErrors'),[]);
     await writeFile(path.join(output,`${site}-cached.png`),Buffer.from((await call('Page.captureScreenshot')).data,'base64'));
     if(site==='bilibili'){
-      await evaluate("installTestVideoState(document.querySelector('#active-video'),1.5);document.querySelector('#active-video').dispatchEvent(new Event('timeupdate'))");
+      await evaluate("result.segments[0].end=1.01;result.segments[1].start=1.01;result.segments[1].end=2.02;installTestVideoState(document.querySelector('#active-video'),2.0);document.querySelector('#active-video').dispatchEvent(new Event('timeupdate'))");
       await wait("document.querySelector('.ytba-segment.active')?.dataset.index==='1'");
       assert.match(await evaluate("document.querySelector('#ytba-overlay').textContent"),/第二句译文/);
       await evaluate(`(()=>{const old=document.querySelector('#active-video');const replacement=document.createElement('video');replacement.id='replacement-video';replacement.controls=true;old.replaceWith(replacement);installTestVideoState(replacement,.5);setTimeout(()=>replacement.dispatchEvent(new Event('timeupdate')),180)})()`);

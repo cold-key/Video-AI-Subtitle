@@ -20,7 +20,7 @@ def record(complete=True, cid=123):
     return CacheRecord(identity=identity(cid), title="Test", source="whisper", source_language="en",
         segments=[Segment(start=0, end=1, en="hello", zh="你好" if complete else "")],
         summary="摘要" if complete else "", summary_state="completed" if complete else "idle",
-        subtitle_timing_version=1, complete=complete)
+        subtitle_timing_version=2, complete=complete)
 
 
 @pytest.fixture
@@ -286,7 +286,7 @@ def test_legacy_v8_whisper_cache_is_not_promoted(machines):
 def test_stale_remote_whisper_result_is_retranscribed_and_versioned(machines, server, monkeypatch):
     config, _ = machines
     _, remote, _ = server
-    stale = record().model_copy(update={"subtitle_timing_version": 0})
+    stale = record().model_copy(update={"subtitle_timing_version": 1})
     owner = claim(remote)
     assert submit(remote, owner, stale).status_code == 200
     remote.post(f"/v1/cache/{identity().key}/release", json=lease(owner))
@@ -323,22 +323,23 @@ def test_stale_remote_whisper_result_is_retranscribed_and_versioned(machines, se
         assert job.needs_subtitles
         shared_routes.subtitles(job.id, VideoRequest(
             url=request_url,
-            page_subtitle_identity=PageSubtitleIdentity(bvid=identity().video_id, cid=123),
+            page_subtitle_identity=PageSubtitleIdentity(bvid=identity().video_id, cid=123, duration=604),
             page_subtitle_status="no_tracks",
+            playback_duration=606,
         ))
         await wait_job(job)
         assert job.result.source == "whisper"
         assert job.result.audio_duration == 600
-        assert job.result.subtitle_timing_version == 1
-        assert round(job.result.segments[0].start, 6) == 11
-        assert round(job.result.segments[0].end, 6) == 13.2
+        assert job.result.subtitle_timing_version == 2
+        assert round(job.result.segments[0].start, 6) == 10.1
+        assert round(job.result.segments[0].end, 6) == 12.12
         cached = remote.get(f"/v1/cache/{identity().key}").json()["record"]
-        assert cached["subtitle_timing_version"] == 1
+        assert cached["subtitle_timing_version"] == 2
         assert cached["audio_duration"] == 600
 
     asyncio.run(scenario())
-    preserved = shared_client.SHARED_DIR / "results" / f"{identity().key}.timing-v0.json"
-    assert CacheRecord.model_validate_json(preserved.read_text(encoding="utf-8")).subtitle_timing_version == 0
+    preserved = shared_client.SHARED_DIR / "results" / f"{identity().key}.timing-v1.json"
+    assert CacheRecord.model_validate_json(preserved.read_text(encoding="utf-8")).subtitle_timing_version == 1
 
 
 def test_offline_wait_cancel_and_local_hit(machines, monkeypatch):
@@ -414,7 +415,7 @@ def test_existing_local_v8_is_promoted_without_processing(machines, monkeypatch)
 
 def test_local_override_queues_without_claiming(machines, monkeypatch):
     config, _ = machines
-    partial = pipeline.CACHE_DIR / f"shared_v1_{identity().key[:32]}.partial.v8.json"
+    partial = pipeline.CACHE_DIR / f"shared_v2_{identity().key[:32]}.partial.v8.json"
     partial.write_text(json.dumps(record().checkpoint(), ensure_ascii=False), encoding="utf-8")
     from service.app.llm import LlmClient
     class NoRequests(LlmClient):
@@ -469,7 +470,7 @@ def test_local_api_routes_and_shared_secret_redaction(machines, server, monkeypa
 
 
 def test_job_stays_active_until_upload_finishes(machines, monkeypatch):
-    partial = pipeline.CACHE_DIR / f"shared_v1_{identity().key[:32]}.partial.v8.json"
+    partial = pipeline.CACHE_DIR / f"shared_v2_{identity().key[:32]}.partial.v8.json"
     partial.write_text(json.dumps(record().checkpoint()), encoding="utf-8")
     factory = shared_jobs.SharedClient
     async def scenario():

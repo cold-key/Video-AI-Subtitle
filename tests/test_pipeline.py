@@ -50,7 +50,7 @@ def test_truncated_download_failure_uses_actionable_message(monkeypatch):
 
     job = pipeline.JobView(id="truncated", state="queued", stage="等待处理", progress=0)
     pipeline.JOBS[job.id] = job
-    async def fail_download(*_args):
+    async def fail_download(*_args, **_kwargs):
         raise RuntimeError("ERROR: [download] Got error: Downloaded 1 bytes, expected 2 bytes")
     monkeypatch.setattr(pipeline, "process_job", fail_download)
     asyncio.run(pipeline._run_job(job.id, "https://www.bilibili.com/video/BV1test"))

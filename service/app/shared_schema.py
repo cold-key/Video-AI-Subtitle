@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .models import ProcessedVideo, Segment
 
 MAX_BYTES = 32 * 1024 * 1024
-BILIBILI_WHISPER_TIMING_VERSION = 1
+BILIBILI_WHISPER_TIMING_VERSION = 2
 
 
 class ResourceIdentity(BaseModel):

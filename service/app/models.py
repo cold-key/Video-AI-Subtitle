@@ -134,6 +134,7 @@ class VideoRequest(BaseModel):
     page_subtitle_identity: PageSubtitleIdentity | None = None
     page_subtitle_status: Literal["found", "no_tracks"] | None = None
     page_subtitle_provenance: PageSubtitleProvenance | None = None
+    playback_duration: float | None = Field(default=None, gt=0, le=604800, allow_inf_nan=False)
 
 
 class Segment(BaseModel):

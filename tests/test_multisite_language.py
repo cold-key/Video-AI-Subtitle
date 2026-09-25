@@ -24,16 +24,30 @@ def test_bilibili_whisper_timestamps_scale_only_for_measured_duration_drift():
     assert scale == 1
     assert applied is False
 
-    aligned, scale, applied = pipeline._align_whisper_segments(segments, 600, 660)
-    assert scale == 1.1
-    assert applied is True
-    assert aligned[0].start == 11
-    assert round(aligned[0].end, 6) == 13.2
-
-    rejected, scale, applied = pipeline._align_whisper_segments(segments, 500, 660)
-    assert rejected == segments
-    assert scale == 1.32
+    unchanged, scale, applied = pipeline._align_whisper_segments(segments, 600, 600.3)
+    assert unchanged == segments
+    assert scale == 1
     assert applied is False
+
+    aligned, scale, applied = pipeline._align_whisper_segments(segments, 600, 606)
+    assert scale == 1.01
+    assert applied is True
+    assert aligned[0].start == 10.1
+    assert round(aligned[0].end, 6) == 12.12
+
+    rejected, scale, applied = pipeline._align_whisper_segments(segments, 600, 660)
+    assert rejected == segments
+    assert scale == 1.1
+    assert applied is False
+    assert pipeline._preview_whisper_timing_scale(600, 606) == 1.01
+    assert pipeline._preview_whisper_timing_scale(600, 660) == 1.0
+
+
+def test_bilibili_timing_reference_prefers_player_then_verified_page_then_ytdlp():
+    assert pipeline._select_bilibili_timing_reference(606, 604, 650) == (606, "player")
+    assert pipeline._select_bilibili_timing_reference(float("nan"), 604, 650) == (604, "page_api")
+    assert pipeline._select_bilibili_timing_reference(0, float("inf"), 650) == (650, "yt_dlp")
+    assert pipeline._select_bilibili_timing_reference(None, 0, None) == (None, "unavailable")
 
 
 def test_old_bilibili_whisper_result_is_kept_and_reprocessed(tmp_path, monkeypatch):
@@ -56,9 +70,16 @@ def test_old_bilibili_whisper_result_is_kept_and_reprocessed(tmp_path, monkeypat
         {"title": "new", "duration": 100}, [], directory / "audio.wav",
     ))
 
+    observed_preview = {}
+
     def fake_transcribe(*args):
         args[-1](100, 90)
-        return [Segment(start=20, end=21, en="new transcript")], "en"
+        segments = [Segment(start=20, end=21, en="new transcript")]
+        args[-4](segments, "en")
+        observed_preview["display_start"] = pipeline.JOBS[job_id].preview_segments[0].start
+        partial_path = cache_dir / f"{pipeline.cache_key_from_url(url)}_whisper_timing_v2.partial.v8.json"
+        observed_preview["checkpoint_start"] = json.loads(partial_path.read_text(encoding="utf-8"))["segments"][0]["start"]
+        return segments, "en"
 
     class FakeLlm:
         def __init__(self, config): pass
@@ -74,14 +95,20 @@ def test_old_bilibili_whisper_result_is_kept_and_reprocessed(tmp_path, monkeypat
     job_id = "reprocess-old-whisper-cache"
     pipeline.JOBS[job_id] = JobView(id=job_id, state="queued", stage="queued", progress=0)
 
-    asyncio.run(pipeline.process_job(job_id, url))
+    asyncio.run(pipeline.process_job(
+        job_id, url, playback_duration=100.2, page_duration=100.1,
+    ))
 
     job = pipeline.JOBS.pop(job_id)
-    refreshed_path = cache_dir / f"{pipeline.cache_key_from_url(url)}_whisper_timing_v1.v8.json"
+    refreshed_path = cache_dir / f"{pipeline.cache_key_from_url(url)}_whisper_timing_v2.v8.json"
     assert job.result.segments[0].en == "new transcript"
-    assert job.result.subtitle_timing_version == 1
+    assert round(job.result.segments[0].start, 6) == 20.04
+    assert round(job.result.segments[0].end, 6) == 21.042
+    assert round(observed_preview["display_start"], 6) == 20.04
+    assert observed_preview["checkpoint_start"] == 20
+    assert job.result.subtitle_timing_version == 2
     assert ProcessedVideo.model_validate_json(legacy_path.read_text(encoding="utf-8")).segments[0].en == "old transcript"
-    assert ProcessedVideo.model_validate_json(refreshed_path.read_text(encoding="utf-8")).subtitle_timing_version == 1
+    assert ProcessedVideo.model_validate_json(refreshed_path.read_text(encoding="utf-8")).subtitle_timing_version == 2
 
 
 def test_read_bilibili_srt_preserves_japanese_language(tmp_path):
@@ -482,5 +509,5 @@ def test_bilibili_japanese_pipeline_writes_site_specific_cache(tmp_path, monkeyp
     assert job.result.source_language == "ja"
     assert job.result.source == "bilibili_subtitles"
     assert job.result.segments[0].zh == "测试"
-    assert (cache_dir / "bilibili_BV1test123_p2_whisper_timing_v1.v8.json").exists()
+    assert (cache_dir / "bilibili_BV1test123_p2_whisper_timing_v2.v8.json").exists()
 # Moon End

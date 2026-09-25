@@ -207,6 +207,8 @@ async def start_job(request: VideoRequest):  # Moon Modified: keep task creation
         str(request.url), request.page_subtitles, request.page_subtitle_language,
         request.page_subtitle_identity.cid if request.page_subtitle_identity and request.page_subtitles else None,
         request.page_subtitle_provenance.model_dump() if request.page_subtitle_provenance else None,
+        request.playback_duration,
+        request.page_subtitle_identity.duration if request.page_subtitle_identity else None,
     )
     job_id = job.id if hasattr(job, "id") else job.get("id", "")
     provenance = request.page_subtitle_provenance

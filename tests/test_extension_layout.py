@@ -325,7 +325,8 @@ def test_recognized_segments_stream_into_transcript_before_translation():
     pipeline = (root / "service" / "app" / "pipeline.py").read_text(encoding="utf-8")
     models = (root / "service" / "app" / "models.py").read_text(encoding="utf-8")
     assert "recognized_segments: int = 0" in models
-    assert "job.preview_segments = recognized" in pipeline
+    assert "job.preview_segments = display_segments" in pipeline
+    assert '"segments": [segment.model_dump() for segment in recognized]' in pipeline
     assert "job.recognized_segments = len(recognized)" in pipeline
     assert "job.recognized_segments!==renderedRecognitionCount" in script
     assert "已识别，等待翻译…" in script
