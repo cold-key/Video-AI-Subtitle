@@ -9,7 +9,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/watch*", "https://www.bilibili.com/video/*", "https://www.bilibili.com/bangumi/play/*", "https://www.bilibili.com/list/watchlater/*"],
-      "js": ["content.js"],
+      "js": ["subtitle-time-map.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

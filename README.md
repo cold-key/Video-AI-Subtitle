@@ -73,13 +73,15 @@ Sharing is off by default. The server stores text results and checkpoints, never
 | 2 | Bilibili caption API | Resolves the exact video part from the current URL, then accepts only verifiable regular caption tracks. Because Bilibili's AI-caption API can return content that does not belong to the current video, `v1.0.0` ignores tracks marked as AI. |
 | 3 | Local Whisper | Downloads the current video audio and transcribes it locally. Choose CPU, CUDA, and model size in Settings. |
 
+If Bilibili subtitles remain offset after seeking, open the player sidebar's **More tools → Two-point subtitle timing calibration**. At two widely separated positions where you can identify the spoken line, pause at the beginning of the line, enter that line's start time from the transcript, and record each point. The linear mapping adjusts both displayed subtitles and transcript-click seeks. Calibration is stored locally per video part and can be cleared at any time.
+
 ## Settings at a glance
 
 - **Models:** translation and summary models are configured independently through any OpenAI-compatible endpoint.
 - **Whisper:** choose a multilingual `tiny`, `base`, `small`, or `medium` model. `small` is the default; use a multilingual model for Japanese.
 - **Performance:** CPU works everywhere. CUDA can be configured from Advanced Settings when an NVIDIA GPU is available.
 - **Storage:** model and GPU-runtime folders can be relocated; resumable task/download cache can be cleared separately.
-- **Player UI:** adjust subtitle language, size, position, background, sidebar side, width, layout mode, and transparency.
+- **Player UI:** adjust subtitle language, size, position, background, calibrate Bilibili subtitle timing, and change sidebar side, width, layout mode, and transparency.
 
 ### Extension updates
 

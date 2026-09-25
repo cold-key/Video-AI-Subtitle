@@ -360,11 +360,24 @@ def test_transcript_follow_uses_smooth_half_page_pre_scroll_instead_of_per_cue_s
 def test_transcript_seek_immediately_repositions_current_cue_before_resuming_pre_scroll():
     # Moon Add: a timeline seek is intentional navigation, not normal playback following.
     script = (Path(__file__).parents[1] / "extension" / "content.js").read_text(encoding="utf-8")
-    assert "lastSubtitleSyncTime<0||Math.abs(now-lastSubtitleSyncTime)>3" in script
+    assert "lastSubtitleSyncTime<0||Math.abs(playerTime-lastSubtitleSyncTime)>3" in script
     assert "active.offsetTop-body.clientHeight*.32" in script
     assert "requestAnimationFrame(syncSubtitle);" in script
     assert "if (!result) return;" in script
     assert "if (overlay) {" in script
+
+
+def test_bilibili_two_point_calibration_applies_to_subtitle_clock_and_transcript_seeks():
+    root = Path(__file__).parents[1] / "extension"
+    script = (root / "content.js").read_text(encoding="utf-8")
+    manifest = (root / "manifest.json").read_text(encoding="utf-8")
+    assert '"js": ["subtitle-time-map.js", "content.js"]' in manifest
+    assert 'subtitleTimeCalibration:bilibili:${result.video_id}:p${page}' in script
+    assert "SubtitleTimeMap.playerTimeToSubtitleTime(subtitleCalibrationPoints,playerTime)" in script
+    assert "SubtitleTimeMap.subtitleTimeToPlayerTime(subtitleCalibrationPoints,result.segments[Number(el.dataset.index)].start)" in script
+    assert 'data-calibration-point="0"' in script
+    assert 'data-calibration-point="1"' in script
+    assert "loadSubtitleCalibration();" in script
 
 
 def test_completed_job_returns_from_streamed_summary_to_transcript_tab():
