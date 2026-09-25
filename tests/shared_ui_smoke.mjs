@@ -7,7 +7,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 
 const root=path.resolve(import.meta.dirname,"..");
-const output=process.env.YTBA_UI_SMOKE_OUTPUT||path.join(root,".test-data",`shared-ui-${Date.now()}`);
+const output=path.join(root,".test-data","shared-ui");
 await mkdir(output,{recursive:true});
 const shim=`
 window.testErrors=[];window.addEventListener('error',e=>testErrors.push(e.message));
@@ -15,13 +15,12 @@ window.addEventListener('unhandledrejection',e=>testErrors.push(String(e.reason)
 window.testRequests=[];window.captionRequests=0;window.testState='cached';
 window.confirm=()=>true;
 let listener;
-window.testStorage={};window.chrome={runtime:{sendMessage:async message=>{
+window.chrome={runtime:{sendMessage:async message=>{
   if(message.type==='resolve-bilibili-resource')return {identity:{bvid:'BV1test123',cid:123}};
   if(message.type==='fetch-bilibili-subtitles'){captionRequests++;return {segments:[],status:'no_tracks',identity:{bvid:'BV1test123',cid:123}};}
   return {ok:true};
-},onMessage:{addListener:fn=>{listener=fn;window.startTest=()=>fn({type:'start'});}}},storage:{local:{get:async key=>typeof key==='string'?{[key]:testStorage[key]}:{...key,...testStorage},set:async values=>Object.assign(testStorage,values),remove:async key=>delete testStorage[key]},onChanged:{addListener:()=>{}}}};
+},onMessage:{addListener:fn=>{listener=fn;window.startTest=()=>fn({type:'start'});}}},storage:{local:{get:async defaults=>defaults,set:async()=>{}},onChanged:{addListener:()=>{}}}};
 const result={video_id:'BV1test123',title:'共享字幕测试',url:location.href,duration:2,source:'whisper',platform:location.hostname.includes('bilibili')?'bilibili':'youtube',source_language:'en',segments:[{start:0,end:2,en:'Hello from another computer.',zh:'这是另一台电脑生成的字幕。'}],summary:'共享缓存摘要',key_points:[]};
-result.segments.push({start:297,end:300,en:'Calibration cue one.',zh:'校准字幕一。'},{start:400,end:402,en:'Calibration cue two.',zh:'校准字幕二。'},{start:594,end:596,en:'Calibration cue three.',zh:'校准字幕三。'});
 const config={base_url:'https://model.invalid/v1',api_key_configured:true,translation_model:'test',summary_model:'test',whisper_model:'small',device:'cpu',shared_cache_enabled:true,shared_cache_url:'https://cache.invalid',shared_cache_token_configured:true};
 window.fetch=async (url,options={})=>{
   const pathname=new URL(url,location.href).pathname;testRequests.push(pathname);
@@ -44,8 +43,8 @@ const server=createServer(async(req,res)=>{
       res.end(html.replace('<script src="options.js"></script>',`<script>${shim}</script><script src="/options.js"></script>`));
     }else if(pathname.startsWith('/video/')||pathname==='/watch'){
       res.setHeader("Content-Type","text/html;charset=utf-8");
-      res.end(`<!doctype html><meta charset="utf-8"><title>Isolated video UI test</title><link rel="stylesheet" href="/content.css"><style>body{background:#242936;color:white;font:20px Arial}video{width:800px;height:450px;background:#12151b}</style><h1>共享缓存视频面板测试</h1><div class="bpx-player-container html5-video-player"><video controls></video></div><script>${shim}</script><script src="/subtitle-time-map.js"></script><script src="/content.js"></script>`);
-    }else if(['/options.js','/content.js','/content.css','/subtitle-time-map.js'].includes(pathname)){
+      res.end(`<!doctype html><meta charset="utf-8"><title>Isolated video UI test</title><link rel="stylesheet" href="/content.css"><style>body{background:#242936;color:white;font:20px Arial}video{width:800px;height:450px;background:#12151b}</style><h1>共享缓存视频面板测试</h1><div class="bpx-player-container html5-video-player"><video controls></video></div><script>${shim}</script><script src="/content.js"></script>`);
+    }else if(['/options.js','/content.js','/content.css'].includes(pathname)){
       res.setHeader("Content-Type",pathname.endsWith('.css')?'text/css':'application/javascript');
       res.end(await readFile(path.join(root,'extension',pathname.slice(1))));
     }else{res.writeHead(404);res.end();}
@@ -88,17 +87,6 @@ try{
     await wait("typeof startTest==='function'");
     await evaluate('startTest()');
     await wait("document.querySelector('[data-shared-regenerate]')?.hidden===false");
-    if(site==='bilibili'){
-      await wait("document.querySelector('[data-time-calibration]')?.hidden===false");
-      await evaluate("document.querySelector('video').currentTime=300;document.querySelector('[data-calibration-content-time]').value='04:57';document.querySelector('[data-calibration-point=\"0\"]').click()");
-      await wait("document.querySelector('[data-calibration-status]')?.textContent.includes('已记录 1 点')");
-      await evaluate("document.querySelector('video').currentTime=600;document.querySelector('[data-calibration-content-time]').value='09:54';document.querySelector('[data-calibration-point=\"1\"]').click()");
-      await wait("document.querySelector('[data-calibration-status]')?.textContent.includes('0.9900')");
-      await evaluate("document.querySelector('video').currentTime=100;document.querySelectorAll('.ytba-segment')[2].click();document.querySelector('video').dispatchEvent(new Event('timeupdate'))");
-      assert.ok(Math.abs(await evaluate("document.querySelector('video').currentTime")-404.040404)<0.001);
-      assert.deepEqual(await evaluate('testErrors'),[]);
-      await evaluate("document.querySelector('.ytba-tools-menu').open=true");
-    }
     assert.equal(await evaluate('captionRequests'),0);
     assert.equal(await evaluate("testRequests.includes('/jobs')"),false);
     assert.match(await evaluate("document.querySelector('[data-status]').textContent"),/共享缓存/);

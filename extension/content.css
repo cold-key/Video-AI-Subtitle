@@ -65,16 +65,6 @@ body.ytba-panel-resizing #ytba-root, body.ytba-panel-resizing #page-manager, bod
 .ytba-tools-menu summary::-webkit-details-marker { display:none; }
 .ytba-tools-popover { position:absolute;z-index:8;right:0;top:36px;width:205px;padding:9px;display:grid;grid-template-columns:1fr 1fr;gap:7px;background:rgba(25,29,37,.98);border:1px solid #454f61;border-radius:10px;box-shadow:0 12px 30px #0009; }
 .ytba-tools-popover .ytba-control { text-align:left; }
-.ytba-tools-popover:has(.ytba-time-calibration:not([hidden])) { width:280px; }
-.ytba-time-calibration { grid-column:1 / -1;min-width:0;display:grid;gap:7px;padding-top:8px;border-top:1px solid #454f61;color:#dce5f6;font-size:11px;line-height:1.45; }
-.ytba-time-calibration[hidden] { display:none; }
-.ytba-time-calibration strong { color:#fff;font-size:12px; }
-.ytba-time-calibration p { margin:0;color:#aeb9cb; }
-.ytba-time-calibration label { display:flex;align-items:center;justify-content:space-between;gap:8px; }
-.ytba-time-calibration input { width:94px;min-width:0;padding:4px 6px;color:#f3f6ff;background:#252a35;border:1px solid #565f70;border-radius:4px;font:inherit;font-variant-numeric:tabular-nums; }
-.ytba-calibration-actions { display:grid;grid-template-columns:1fr 1fr;gap:7px; }
-.ytba-calibration-status { min-height:30px;color:#9fb9e8; }
-.ytba-time-calibration [data-calibration-clear] { justify-self:start; }
 .ytba-task-actions { display:flex;gap:7px;margin-top:9px;padding-left:36px; }
 .ytba-task-actions button { padding:4px 11px;color:#c9d3e3;background:transparent;border:1px solid #465063;border-radius:6px;font-size:12px;cursor:pointer; }
 .ytba-task-actions button:hover,.ytba-task-actions button.active { color:#fff;background:#33415a;border-color:#638be0; }

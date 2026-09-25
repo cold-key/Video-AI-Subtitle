@@ -1,5 +1,4 @@
 (() => {
-  const SubtitleTimeMap = globalThis.YTBA_SUBTITLE_TIME_MAP;
   const API = "http://127.0.0.1:18765";
   let job = null;
   let result = null;
@@ -20,10 +19,6 @@
   let summaryComplete = false;
   let lastTranscriptFollowIndex = -1;
   let lastSubtitleSyncTime = -1;
-  let subtitleCalibrationKey = "";
-  let subtitleCalibrationPoints = [null, null];
-  let subtitleCalibrationLoaded = false;
-  let subtitleCalibrationLoadError = "";
   let layoutAnimationFrame = 0;
   // Moon Add: a page-owned lease keeps the shared native service alive while this tab has a job.
   const serviceLeaseId=`ytba-${crypto.randomUUID()}`;
@@ -234,7 +229,6 @@
     root = document.createElement("aside");
     root.id = "ytba-root";
     root.innerHTML = `<button class="ytba-edge-handle" data-expand title="展开字幕助手；右键关闭" aria-label="展开字幕助手">译</button><div class="ytba-resize-handle" data-resize title="拖拽调整侧栏宽度"></div><div class="ytba-head"><div class="ytba-brand"><span class="ytba-brand-mark" aria-hidden="true">译</span><span><strong>AI 双语字幕助手</strong><small>字幕 · 翻译 · 摘要</small></span></div><button class="ytba-icon-button" data-retry title="从缓存继续" aria-label="重试">↻</button><button class="ytba-icon-button ytba-collapse" data-close title="收缩侧栏" aria-label="收缩侧栏">&gt;</button><button class="ytba-icon-button ytba-dismiss" data-dismiss title="关闭助手" aria-label="关闭助手">×</button></div><div class="ytba-status"><div class="ytba-status-row"><div class="ytba-pulse" aria-hidden="true"></div><span data-status>准备中</span><button type="button" class="ytba-play-completed" data-play-completed hidden title="收起完成提示" aria-label="收起完成提示">确定</button></div><div class="ytba-local-progress" data-local-progress hidden></div><div class="ytba-progress"><div style="width:0%"></div></div><div class="ytba-task-actions"><button data-task="pause">暂停</button><button data-task="cancel">取消</button></div></div><div class="ytba-primary-tools"><button class="ytba-control" data-control="visible">隐藏字幕</button><label class="ytba-control ytba-language">语言 <select data-control="language"><option value="bilingual">原文 + 中文</option><option value="zh">仅中文</option><option value="source">仅原文</option></select><span data-language-static hidden>中文</span></label><button class="ytba-control" data-layout-mode>布局：覆盖</button><details class="ytba-tools-menu"><summary title="更多工具">•••</summary><div class="ytba-tools-popover"><button class="ytba-control" data-control="smaller">字号 −</button><button class="ytba-control" data-control="larger">字号 ＋</button><button class="ytba-control" data-control="up">字幕上移</button><button class="ytba-control" data-control="down">字幕下移</button><button class="ytba-control" data-side>移到左侧</button><button class="ytba-control" data-control="background">字幕背景</button><button class="ytba-control" data-export disabled>导出 Markdown</button><button class="ytba-control" data-control="reset">恢复显示默认值</button></div></details></div><div class="ytba-subtitle-source" data-subtitle-source hidden></div><div class="ytba-tabs"><button class="active" data-tab="transcript"><span>字幕</span><i class="ytba-tab-indicator"></i></button><button data-tab="summary"><span>摘要</span><i class="ytba-tab-indicator"></i></button></div><div class="ytba-body"></div>`;
-    addSubtitleCalibrationControls(root);
     // Moon Begin: collapse into a persistent edge handle instead of deleting the panel.
     root.querySelector("[data-close]").onclick = event => { event.stopPropagation(); setPanelCollapsed(true); };
     root.querySelector("[data-dismiss]").onclick = event => { event.stopPropagation(); closeAssistant(); };
@@ -385,142 +379,8 @@
     root.querySelector('[data-control="down"]').onclick=()=>updateSubtitlePrefs({bottom:Math.max(2,subtitlePrefs.bottom-3)});
     root.querySelector('[data-control="background"]').onclick=()=>updateSubtitlePrefs({background:!subtitlePrefs.background});
     root.querySelector('[data-control="reset"]').onclick=()=>updateSubtitlePrefs({...defaultSubtitlePrefs});
-    root.querySelectorAll("[data-calibration-point]").forEach(button=>{
-      button.onclick=()=>recordSubtitleCalibration(Number(button.dataset.calibrationPoint));
-    });
-    const clearCalibration=root.querySelector("[data-calibration-clear]");
-    if(clearCalibration)clearCalibration.onclick=clearSubtitleCalibration;
     refreshSubtitleControls();
-    refreshSubtitleCalibrationControls();
     // Moon End
-  }
-
-  function addSubtitleCalibrationControls(root) {
-    if(site!=="bilibili")return;
-    const calibration=document.createElement("section");
-    calibration.className="ytba-time-calibration";
-    calibration.dataset.timeCalibration="";
-    calibration.hidden=true;
-    calibration.innerHTML=`<strong>字幕时间两点校准</strong><p>暂停在实际语句开头，找到对应字幕行，填入左侧起始时间（mm:ss）。在两个相距较远的位置分别记录。</p><label>播放器时间 <output data-calibration-player-time>--:--</output></label><label>实际内容时间（秒或 mm:ss）<input data-calibration-content-time type="text" inputmode="decimal" placeholder="例如 09:36"></label><div class="ytba-calibration-actions"><button class="ytba-control" data-calibration-point="0">记录点 1</button><button class="ytba-control" data-calibration-point="1">记录点 2</button></div><output class="ytba-calibration-status" data-calibration-status aria-live="polite">尚未校准，字幕使用播放器时间。</output><button class="ytba-control" data-calibration-clear>清除校准</button>`;
-    root.querySelector(".ytba-tools-popover")?.append(calibration);
-  }
-
-  function subtitleCalibrationStorageKey() {
-    if(site!=="bilibili"||!result?.video_id)return "";
-    const page=new URLSearchParams(location.search).get("p")||"1";
-    return `subtitleTimeCalibration:bilibili:${result.video_id}:p${page}`;
-  }
-
-  function parseSubtitleCalibrationTime(value) {
-    const parts=String(value||"").trim().split(":");
-    if(parts.length<1||parts.length>3||parts.some(part=>part===""||!Number.isFinite(Number(part))))return null;
-    const values=parts.map(Number);
-    if(values.some(part=>part<0))return null;
-    if((parts.length===2&&!Number.isInteger(values[0]))||(parts.length===3&&(!Number.isInteger(values[0])||!Number.isInteger(values[1]))))return null;
-    if(parts.length===1)return values[0];
-    if(values.at(-1)>=60||(parts.length===3&&values[1]>=60))return null;
-    return parts.length===2?values[0]*60+values[1]:values[0]*3600+values[1]*60+values[2];
-  }
-
-  function loadSubtitleCalibration() {
-    const key=subtitleCalibrationStorageKey();
-    subtitleCalibrationKey=key;
-    subtitleCalibrationPoints=[null,null];
-    subtitleCalibrationLoaded=false;
-    subtitleCalibrationLoadError="";
-    refreshSubtitleCalibrationControls();
-    if(!key){subtitleCalibrationLoaded=true;return;}
-    chrome.storage.local.get(key).then(data=>{
-      if(subtitleCalibrationKey!==key)return;
-      const saved=data[key];
-      const points=Array.isArray(saved?.points)?saved.points:[null,null];
-      subtitleCalibrationPoints=[0,1].map(index=>{
-        const point=points[index];
-        if(!point)return null;
-        const playerTime=Number(point.playerTime),subtitleTime=Number(point.subtitleTime);
-        return Number.isFinite(playerTime)&&Number.isFinite(subtitleTime)&&playerTime>=0&&subtitleTime>=0?{playerTime,subtitleTime}:null;
-      });
-      subtitleCalibrationLoaded=true;
-      lastSubtitleSyncTime=-1;
-      refreshSubtitleCalibrationControls();
-      syncSubtitle();
-    }).catch(error=>{
-      console.warn("[YTBA] subtitle calibration load failed",error);
-      if(subtitleCalibrationKey===key){
-        subtitleCalibrationLoadError="读取校准数据失败；为避免覆盖已有设置，校准暂不可用。";
-        refreshSubtitleCalibrationControls();
-      }
-    });
-  }
-
-  function formatCalibrationClock(seconds) {
-    const value=Math.max(0,Number(seconds)||0);
-    return `${formatTime(value)}.${Math.floor(value*10)%10}`;
-  }
-
-  function refreshSubtitleCalibrationControls() {
-    const section=document.querySelector("[data-time-calibration]");
-    if(!section)return;
-    section.hidden=site!=="bilibili"||!result;
-    if(section.hidden)return;
-    const player=video();
-    section.querySelector("[data-calibration-player-time]").textContent=player?formatCalibrationClock(player.currentTime):"--:--";
-    section.querySelectorAll("[data-calibration-point],[data-calibration-clear]").forEach(button=>button.disabled=!subtitleCalibrationLoaded);
-    const count=subtitleCalibrationPoints.filter(Boolean).length;
-    const status=section.querySelector("[data-calibration-status]");
-    if(!subtitleCalibrationLoaded)status.textContent=subtitleCalibrationLoadError||"正在读取此视频的校准数据…";
-    else if(count===0)status.textContent="尚未校准，字幕使用播放器时间。";
-    else if(count===1)status.textContent="已记录 1 点；再记录一个相距至少 30 秒的点后启用。";
-    else {
-      const map=SubtitleTimeMap.createCalibrationMap(subtitleCalibrationPoints);
-      status.textContent=map?`两点校准已启用（时间比例 ${map.rate.toFixed(4)}）。` : "校准点间隔或比例不合理，请重录其中一点。";
-    }
-  }
-
-  async function recordSubtitleCalibration(slot) {
-    const player=video();
-    const input=document.querySelector("[data-calibration-content-time]");
-    const status=document.querySelector("[data-calibration-status]");
-    const key=subtitleCalibrationStorageKey();
-    const subtitleTime=parseSubtitleCalibrationTime(input?.value);
-    const playerTime=Number(player?.currentTime);
-    if(!subtitleCalibrationLoaded||!player||!key||subtitleTime===null||!Number.isFinite(playerTime)||playerTime<0){
-      if(status)status.textContent="请输入有效的字幕时间（秒或 mm:ss）。";
-      return;
-    }
-    const points=[...subtitleCalibrationPoints];
-    points[slot]={playerTime,subtitleTime};
-    if(points.every(Boolean)&&!SubtitleTimeMap.createCalibrationMap(points)){
-      if(status)status.textContent="两个校准点需相距至少 30 秒，且字幕时间应随播放器时间递增；请重录当前点。";
-      return;
-    }
-    try {
-      await chrome.storage.local.set({[key]:{points}});
-      if(subtitleCalibrationKey!==key)return;
-      subtitleCalibrationPoints=points;
-      input.value="";
-      lastSubtitleSyncTime=-1;
-      refreshSubtitleCalibrationControls();
-      syncSubtitle();
-    } catch(error) {
-      if(status)status.textContent=`保存校准失败：${error.message||error}`;
-    }
-  }
-
-  async function clearSubtitleCalibration() {
-    const key=subtitleCalibrationStorageKey();
-    if(!key)return;
-    try {
-      await chrome.storage.local.remove(key);
-      if(subtitleCalibrationKey!==key)return;
-      subtitleCalibrationPoints=[null,null];
-      lastSubtitleSyncTime=-1;
-      refreshSubtitleCalibrationControls();
-      syncSubtitle();
-    } catch(error) {
-      const status=document.querySelector("[data-calibration-status]");
-      if(status)status.textContent=`清除校准失败：${error.message||error}`;
-    }
   }
 
   function updateSubtitlePrefs(changes) {
@@ -935,7 +795,6 @@
   }
 
   function setupResult() {
-    loadSubtitleCalibration();
     setupPlayback();
     const root = ensurePanel();
     refreshSubtitleSource();
@@ -1005,7 +864,7 @@
     }
     const recognizing=job?.state==="running"&&job.stage.includes("识别语音");
     body.innerHTML = result.segments.map((x,i)=>`<div class="ytba-segment" data-index="${i}"><div class="ytba-time">${formatTime(x.start)}</div><div class="${result.source_language==="zh"?"ytba-zh":"ytba-en"}">${escapeHtml(x.en)}</div>${result.source_language==="zh"?"":`<div class="ytba-zh">${x.zh ? escapeHtml(x.zh) : `<span style="color:#707784">${recognizing?"已识别，等待翻译…":"等待翻译…"}</span>`}</div>`}</div>`).join("");
-    body.querySelectorAll(".ytba-segment").forEach(el => el.onclick = () => { const player=video(); player.currentTime=SubtitleTimeMap.subtitleTimeToPlayerTime(subtitleCalibrationPoints,result.segments[Number(el.dataset.index)].start); });
+    body.querySelectorAll(".ytba-segment").forEach(el => el.onclick = () => { const player=video(); player.currentTime=result.segments[Number(el.dataset.index)].start; });
     // Moon Add: the player may have emitted timeupdate before transcript DOM
     // exists. Re-sync after rendering so the current timestamp is located.
     requestAnimationFrame(syncSubtitle);
@@ -1015,13 +874,11 @@
     if (!result) return;
     const player=video();
     if (!player) return;
-    const playerTime = player.currentTime;
-    refreshSubtitleCalibrationControls();
-    const now = SubtitleTimeMap.playerTimeToSubtitleTime(subtitleCalibrationPoints,playerTime);
+    const now = player.currentTime;
     // Moon Modified: the first sync may happen after the viewer has already
     // sought or started playback, so it must locate the current cue too.
-    const jumped=lastSubtitleSyncTime<0||Math.abs(playerTime-lastSubtitleSyncTime)>3;
-    lastSubtitleSyncTime=playerTime;
+    const jumped=lastSubtitleSyncTime<0||Math.abs(now-lastSubtitleSyncTime)>3;
+    lastSubtitleSyncTime=now;
     const index = result.segments.findIndex(x => x.start <= now && x.end >= now);
     const item = result.segments[index];
     // Moon Modified: transcript following must work even before the video
@@ -1073,7 +930,6 @@
       if(job&&["queued","running","paused"].includes(job.state))releaseService().catch(()=>{});
     }
     lastUrl = location.href;
-    subtitleCalibrationKey="";subtitleCalibrationPoints=[null,null];subtitleCalibrationLoaded=false;subtitleCalibrationLoadError="";
     const player = video();
     if (player && playbackReady) player.removeEventListener("timeupdate", syncSubtitle);
     playerResizeObserver?.disconnect(); playerResizeObserver=null; cancelAnimationFrame(layoutAnimationFrame); layoutAnimationFrame=0;
