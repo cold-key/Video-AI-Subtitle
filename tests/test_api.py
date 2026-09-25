@@ -59,6 +59,25 @@ def test_installation_endpoint_reports_active_project_copy(tmp_path, monkeypatch
     }
 
 
+def test_subtitle_playback_diagnostic_accepts_only_numeric_metadata(monkeypatch):
+    events = []
+    monkeypatch.setattr(main, "log_event", lambda name, **fields: events.append((name, fields)))
+    client = TestClient(app)
+    payload = {
+        "source": "whisper", "player_time": 42.5, "player_duration": 600,
+        "playback_rate": 1, "wall_elapsed": 20, "media_elapsed": 20.01,
+        "previous_player_time": 22.49, "cue_index": 10, "cue_start": 42,
+        "cue_end": 44, "previous_cue_index": 5, "previous_cue_start": 21,
+        "cue_count": 200, "player_count": 2, "selected_player_index": 0,
+    }
+
+    response = client.post("/diagnostics/subtitle-playback", json=payload)
+
+    assert response.status_code == 200
+    assert events == [("subtitle_playback_sample", payload)]
+    assert client.post("/diagnostics/subtitle-playback", json={**payload, "caption_text": "not accepted"}).status_code == 422
+
+
 def test_whisper_model_selection_is_saved_independently(monkeypatch):
     # Moon Add: selecting a model must not require submitting or overwrite the rest of the form.
     original = ServiceConfig(

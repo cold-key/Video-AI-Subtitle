@@ -14,7 +14,8 @@ from fastapi.responses import PlainTextResponse
 from .config import CACHE_DIR, ensure_dirs, load_config, resolve_install_dir, save_config
 from .models import (
     CudaRuntimeStatus, DownloadCacheResult, JobView, ModelStatus, PublicConfig, ServiceConfig,
-    PageSubtitleDiagnostic, StoragePathResult, StoragePathSelection, StoragePathUpdate, VideoRequest,
+    PageSubtitleDiagnostic, StoragePathResult, StoragePathSelection, StoragePathUpdate,
+    SubtitlePlaybackDiagnostic, VideoRequest,
     WhisperModelSelection,
 )
 from .pipeline import (
@@ -242,6 +243,13 @@ def page_subtitle_diagnostic(diagnostic: PageSubtitleDiagnostic):
         subtitle_payload_hash=provenance.subtitle_payload_hash if provenance else "",
         cue_timing_hash=provenance.cue_timing_hash if provenance else "",
     )
+    return {"ok": True}
+
+
+@app.post("/diagnostics/subtitle-playback")
+def subtitle_playback_diagnostic(diagnostic: SubtitlePlaybackDiagnostic):
+    # Only timing and player-selection numbers are accepted; subtitle content is excluded.
+    log_event("subtitle_playback_sample", **diagnostic.model_dump())
     return {"ok": True}
 
 

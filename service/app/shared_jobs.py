@@ -16,7 +16,8 @@ from .config import load_config
 from .models import JobView, VideoRequest
 from .shared_client import (
     SharedClient, SharedError, atomic_json, checked_record,
-    discard_queued, flush_outbox, local_record, queue_record, save_record,
+    any_local_record, discard_queued, flush_outbox, local_record,
+    preserve_stale_record, queue_record, save_record,
 )
 from .shared_schema import CacheRecord, ResourceIdentity
 
@@ -51,8 +52,8 @@ def finish(job, record, origin):
 def make_record(identity, data, complete, config):
     from .prompts import load_prompt
     fields = {k: data[k] for k in (
-        "title", "duration", "source", "source_language", "segments", "summary_partial",
-        "summary_state", "summary", "key_points",
+        "title", "duration", "audio_duration", "subtitle_timing_version", "source",
+        "source_language", "segments", "summary_partial", "summary_state", "summary", "key_points",
     ) if k in data}
     if complete:
         fields["summary_state"] = "completed"
@@ -77,6 +78,8 @@ def promote_legacy(request, config, partial_path):
             if pipeline.cache_key_from_url(data["url"]) != key:
                 continue
             record = make_record(request.identity, data, True, config)
+            if not record.timing_current:
+                continue
             for field in ("translation_model", "summary_model", "whisper_model", "translation_prompt_hash", "summary_prompt_hash"):
                 setattr(record, field, "")
             save_record(record)
@@ -88,8 +91,16 @@ def promote_legacy(request, config, partial_path):
             path = pipeline.CACHE_DIR / f"{value}.partial.v8.json"
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    request.identity.platform == "bilibili"
+                    and data.get("source") == "whisper"
+                    and data.get("subtitle_timing_version", 0) < pipeline.BILIBILI_WHISPER_TIMING_VERSION
+                ):
+                    continue
                 if data.get("extraction_state", "completed") == "completed":
-                    make_record(request.identity, data, False, config)
+                    partial_record = make_record(request.identity, data, False, config)
+                    if not partial_record.timing_current:
+                        continue
                 atomic_json(partial_path, data)
                 break
             except (ValueError, OSError, KeyError):
@@ -118,8 +129,18 @@ async def run_shared_job(job_id):
     last_snapshot = ""
     last_summary_sync = 0.0
     terminal_state = None
+    existing_local_record = any_local_record(request.identity)
+    if existing_local_record and not existing_local_record.timing_current:
+        preserve_stale_record(existing_local_record)
     # Regeneration uses a separate work key so the old complete result survives.
-    work_key = f"shared_{request.identity.key}" + (f"_regen_{job_id}" if request.regenerate else "")
+    # The first 128 identity-hash bits are ample for local filenames and keep them MAX_PATH-safe.
+    local_identity_key = request.identity.key[:32]
+    work_key = f"shared_{local_identity_key}"
+    if request.identity.platform == "bilibili":
+        work_key = f"shared_v{pipeline.BILIBILI_WHISPER_TIMING_VERSION}_{local_identity_key}"
+    if request.regenerate:
+        regen_key = job_id[:12] if request.identity.platform == "bilibili" else job_id
+        work_key += f"_regen_{regen_key}"
     partial = pipeline.CACHE_DIR / f"{work_key}.partial.v8.json"
     result_path = pipeline.CACHE_DIR / f"{work_key}.v8.json"
 
@@ -212,6 +233,17 @@ async def run_shared_job(job_id):
                     continue
                 if claim["state"] == "complete":
                     record = checked_record(claim["record"], request.identity, claim["checksum"])
+                    if not record.timing_current:
+                        preserve_stale_record(record)
+                        request.regenerate = True
+                        work_key = f"shared_{local_identity_key}"
+                        if request.identity.platform == "bilibili":
+                            work_key = f"shared_v{pipeline.BILIBILI_WHISPER_TIMING_VERSION}_{local_identity_key}"
+                        work_key += f"_regen_{job_id[:12]}"
+                        partial = pipeline.CACHE_DIR / f"{work_key}.partial.v8.json"
+                        result_path = pipeline.CACHE_DIR / f"{work_key}.v8.json"
+                        job.stage, job.shared_state = "正在重新生成旧版 B 站语音时间戳", "processing"
+                        continue
                     save_record(record)
                     finish(job, record, "共享")
                     return
@@ -222,7 +254,10 @@ async def run_shared_job(job_id):
                 lease = {name: claim[name] for name in ("generation", "token")}
                 if claim.get("checkpoint"):
                     record = checked_record(claim["checkpoint"], request.identity)
-                    atomic_json(partial, record.checkpoint())
+                    if record.timing_current:
+                        atomic_json(partial, record.checkpoint())
+                    else:
+                        job.stage = "重新识别旧版 B 站语音时间戳"
                 monitor = asyncio.create_task(watch())
             control.shared_guard = guard
             job.shared_state, job.sync_error = "processing", ""

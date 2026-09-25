@@ -8,7 +8,11 @@
   let renderedTranslationCount = -1;
   let renderedRecognitionCount = -1;
   let activeTab = "transcript";
-  let playbackReady = false;
+  let playbackVideo = null;
+  let playbackMutationObserver = null;
+  let playerRefreshTimer = null;
+  let observedPlayerContainer = null;
+  let playbackDiagnosticSample = null;
   let panelCollapsed = false;
   let assistantDismissed = false;
   let completionNoticeDismissed = false;
@@ -42,14 +46,83 @@
     return response.json();
   }
 
-  function video() { return document.querySelector("video"); }
+  const bilibiliPlayerSelector = ".bpx-player-container,.bilibili-player,.bilibili-player-video";
+  const bilibiliVideoSelector = bilibiliPlayerSelector.split(",").map(selector=>`${selector} video`).join(",");
 
-  function playerContainer() {
-    const player=video();
+  function bilibiliVideos() {
+    const playerVideos=[...document.querySelectorAll(bilibiliVideoSelector)];
+    return playerVideos.length?playerVideos:[...document.querySelectorAll("video")];
+  }
+
+  function isVisiblePlayerVideo(player) {
+    if(!player?.isConnected)return false;
+    const rect=player.getBoundingClientRect();
+    const style=getComputedStyle(player);
+    return rect.width>8&&rect.height>8&&style.display!=="none"&&style.visibility!=="hidden"&&Number(style.opacity||1)>0;
+  }
+
+  function playerScore(player) {
+    const rect=player.getBoundingClientRect();
+    const area=Math.min(1000,rect.width*rect.height/1000);
+    return (!player.paused&&!player.ended?100000:0)+(player.readyState>=2?1000:0)+(player===playbackVideo?100:0)+area;
+  }
+
+  function video() {
+    if(site!=="bilibili")return document.querySelector("video");
+    const candidates=bilibiliVideos();
+    const visible=candidates.filter(isVisiblePlayerVideo);
+    const playing=visible.filter(player=>!player.paused&&!player.ended);
+    if(playing.length)return playing.sort((left,right)=>playerScore(right)-playerScore(left))[0];
+    if(playbackVideo&&visible.includes(playbackVideo))return playbackVideo;
+    return visible.sort((left,right)=>playerScore(right)-playerScore(left))[0]||candidates.find(player=>player.isConnected)||null;
+  }
+
+  function playerContainer(player=video()) {
     if(!player)return null;
     return site==="bilibili"
       ? player.closest(".bpx-player-container,.bilibili-player,.bilibili-player-video") || player.parentElement
       : player.closest(".html5-video-player") || player.parentElement;
+  }
+
+  function bindPlaybackPlayer(player) {
+    if(playbackVideo===player)return;
+    if(playbackVideo){
+      ["timeupdate","seeking","seeked","playing","loadedmetadata","ratechange"].forEach(type=>playbackVideo.removeEventListener(type,syncSubtitle));
+    }
+    playbackVideo=player||null;
+    playbackDiagnosticSample=null;
+    if(playbackVideo){
+      ["timeupdate","seeking","seeked","playing","loadedmetadata","ratechange"].forEach(type=>playbackVideo.addEventListener(type,syncSubtitle));
+    }
+  }
+
+  function observePlayerReplacement() {
+    if(site!=="bilibili"||playbackMutationObserver||!document.body)return;
+    playbackMutationObserver=new MutationObserver(records=>{
+      const relevant=records.some(record=>{
+        const target=record.target instanceof Element?record.target:null;
+        if(record.type==="attributes"){
+          return target?.matches("video")||(
+            ["class","style"].includes(record.attributeName)&&target?.matches(bilibiliPlayerSelector)
+          );
+        }
+        return [...record.addedNodes,...record.removedNodes].some(node=>node instanceof Element&&(
+          node.matches(`video,${bilibiliPlayerSelector}`)||node.querySelector(`video,${bilibiliPlayerSelector}`)
+        ));
+      });
+      if(!relevant)return;
+      clearTimeout(playerRefreshTimer);
+      playerRefreshTimer=setTimeout(()=>setupPlayback(),80);
+    });
+    playbackMutationObserver.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:["class","src","style"]});
+  }
+
+  function stopPlayerObservation() {
+    playbackMutationObserver?.disconnect();
+    playbackMutationObserver=null;
+    clearTimeout(playerRefreshTimer);
+    playerRefreshTimer=null;
+    observedPlayerContainer=null;
   }
 
   function isVideoPage() {
@@ -330,8 +403,8 @@
     clearTimeout(pollTimer);
     cancelAnimationFrame(layoutAnimationFrame);
     pollTimer=null;layoutAnimationFrame=0;
-    const player=video();
-    if(player&&playbackReady)player.removeEventListener("timeupdate",syncSubtitle);
+    stopPlayerObservation();
+    bindPlaybackPlayer(null);
     playerResizeObserver?.disconnect();playerResizeObserver=null;
     document.querySelector("#ytba-prompt")?.remove();
     document.querySelector("#ytba-launcher")?.remove();
@@ -339,7 +412,7 @@
     document.querySelector("#ytba-overlay")?.remove();
     document.querySelectorAll(".ytba-fullscreen-host").forEach(element=>element.classList.remove("ytba-fullscreen-host"));
     document.body.classList.remove("ytba-panel-open","ytba-panel-collapsed","ytba-panel-resizing","ytba-fullscreen");
-    panelCollapsed=false;playbackReady=false;overlay=null;job=null;result=null;
+    panelCollapsed=false;overlay=null;job=null;result=null;observedPlayerContainer=null;
     window.dispatchEvent(new Event("resize"));
     try{if(activeJob)await api(`/jobs/${activeJob}/cancel`,{method:"POST"});}catch(error){console.warn("[YTBA] close cancel failed:",error);}
     releaseService().catch(()=>{});
@@ -804,15 +877,20 @@
 
   function setupPlayback() {
     // Moon Begin: translated batches become playable without waiting for the full job.
+    observePlayerReplacement();
     const player = video();
-    if (!player) return;
-    if (!playbackReady) {
-      player.addEventListener("timeupdate", syncSubtitle);
-      playbackReady = true;
+    bindPlaybackPlayer(player);
+    if (!player) {
+      playerResizeObserver?.disconnect();
+      playerResizeObserver=null;
+      observedPlayerContainer=null;
+      document.querySelector("#ytba-overlay")?.remove();
+      overlay=null;
+      return;
     }
     // Moon Modified: html5-video-container can have zero height on YouTube.
     // Anchor to the stable player box so bottom positioning stays inside the video.
-    const container = playerContainer();
+    const container = playerContainer(player);
     const existingOverlay = document.querySelector("#ytba-overlay");
     if (existingOverlay && existingOverlay.parentElement !== container) existingOverlay.remove();
     if (container && !document.querySelector("#ytba-overlay")) {
@@ -825,7 +903,12 @@
     applySubtitlePrefs();
     refreshSubtitleControls();
     updateResponsiveSubtitleScale();
-    if(!playerResizeObserver){
+    if(observedPlayerContainer!==container){
+      playerResizeObserver?.disconnect();
+      playerResizeObserver=null;
+      observedPlayerContainer=container;
+    }
+    if(container&&!playerResizeObserver){
       playerResizeObserver=new ResizeObserver(updateResponsiveSubtitleScale);
       playerResizeObserver.observe(container);
     }
@@ -874,6 +957,7 @@
     if (!result) return;
     const player=video();
     if (!player) return;
+    bindPlaybackPlayer(player);
     const now = player.currentTime;
     // Moon Modified: the first sync may happen after the viewer has already
     // sought or started playback, so it must locate the current cue too.
@@ -881,6 +965,7 @@
     lastSubtitleSyncTime=now;
     const index = result.segments.findIndex(x => x.start <= now && x.end >= now);
     const item = result.segments[index];
+    recordSubtitlePlaybackSample(player,now,index,item,jumped);
     // Moon Modified: transcript following must work even before the video
     // overlay is mounted; only the visual subtitle drawing depends on it.
     if (overlay) {
@@ -923,6 +1008,41 @@
     }
   }
 
+  function recordSubtitlePlaybackSample(player,mediaTime,cueIndex,item,jumped) {
+    if(site!=="bilibili"||result?.platform!=="bilibili"||player.paused||player.seeking||!Number.isFinite(mediaTime)){
+      playbackDiagnosticSample=null;
+      return;
+    }
+    const wallTime=performance.now();
+    const playbackRate=Number(player.playbackRate)||1;
+    if(jumped||playbackDiagnosticSample?.player!==player||mediaTime<playbackDiagnosticSample.mediaTime||playbackRate!==playbackDiagnosticSample.playbackRate){
+      playbackDiagnosticSample={player,mediaTime,wallTime,cueIndex,cueStart:item?.start??null,playbackRate};
+      return;
+    }
+    const elapsed=(wallTime-playbackDiagnosticSample.wallTime)/1000;
+    if(elapsed<20)return;
+    if(elapsed>120){playbackDiagnosticSample={player,mediaTime,wallTime,cueIndex,cueStart:item?.start??null,playbackRate};return;}
+    const candidates=bilibiliVideos();
+    api("/diagnostics/subtitle-playback",{method:"POST",body:JSON.stringify({
+      source:result.source||"unknown",
+      player_time:mediaTime,
+      player_duration:Number.isFinite(player.duration)?player.duration:null,
+      playback_rate:playbackRate,
+      wall_elapsed:elapsed,
+      media_elapsed:mediaTime-playbackDiagnosticSample.mediaTime,
+      previous_player_time:playbackDiagnosticSample.mediaTime,
+      cue_index:cueIndex>=0?cueIndex:null,
+      cue_start:item?.start??null,
+      cue_end:item?.end??null,
+      previous_cue_index:playbackDiagnosticSample.cueIndex>=0?playbackDiagnosticSample.cueIndex:null,
+      previous_cue_start:playbackDiagnosticSample.cueStart,
+      cue_count:result.segments.length,
+      player_count:candidates.length,
+      selected_player_index:candidates.indexOf(player),
+    })}).catch(()=>{});
+    playbackDiagnosticSample={player,mediaTime,wallTime,cueIndex,cueStart:item?.start??null,playbackRate};
+  }
+
   function watchNavigation() {
     if (location.href === lastUrl) return;
     if(lastUrl){
@@ -930,10 +1050,10 @@
       if(job&&["queued","running","paused"].includes(job.state))releaseService().catch(()=>{});
     }
     lastUrl = location.href;
-    const player = video();
-    if (player && playbackReady) player.removeEventListener("timeupdate", syncSubtitle);
+    stopPlayerObservation();
+    bindPlaybackPlayer(null);
     playerResizeObserver?.disconnect(); playerResizeObserver=null; cancelAnimationFrame(layoutAnimationFrame); layoutAnimationFrame=0;
-    clearTimeout(pollTimer); job = result = null; renderedTranslationCount = -1; renderedSummary = ""; summaryAutoOpened = false; transcriptComplete = false; summaryComplete = false; lastTranscriptFollowIndex = -1; lastSubtitleSyncTime = -1; activeTab = "transcript"; playbackReady = false; overlay = null;
+    clearTimeout(pollTimer); job = result = null; renderedTranslationCount = -1; renderedSummary = ""; summaryAutoOpened = false; transcriptComplete = false; summaryComplete = false; lastTranscriptFollowIndex = -1; lastSubtitleSyncTime = -1; activeTab = "transcript"; overlay = null;observedPlayerContainer=null;playbackDiagnosticSample=null;
     document.querySelector("#ytba-root")?.remove(); document.querySelector("#ytba-overlay")?.remove(); document.querySelector("#ytba-launcher")?.remove(); document.body.classList.remove("ytba-panel-open","ytba-panel-collapsed","ytba-panel-resizing","ytba-fullscreen","ytba-site-youtube","ytba-site-bilibili"); panelCollapsed=false;
     if (isVideoPage()&&!assistantDismissed) setTimeout(site==="bilibili"?showLauncher:showPrompt, 1800);
   }

@@ -4,7 +4,7 @@ import json
 
 from service.app import pipeline
 from service.app.llm import LlmClient
-from service.app.models import JobView, Segment, ServiceConfig
+from service.app.models import JobView, ProcessedVideo, Segment, ServiceConfig
 
 
 def test_caption_selection_prefers_english_then_japanese_then_korean_then_chinese():
@@ -14,6 +14,74 @@ def test_caption_selection_prefers_english_then_japanese_then_korean_then_chines
     assert pipeline._select_caption({"danmaku": [{}], "ko-KR": [{}], "zh-CN": [{}]}) == ("ko-KR", "ko")
     assert pipeline._select_caption({"danmaku": [{}], "zh-CN": [{}]}) == ("zh-CN", "zh")
     assert pipeline._select_caption({"danmaku": [{}]}) is None
+
+
+def test_bilibili_whisper_timestamps_scale_only_for_measured_duration_drift():
+    segments = [Segment(start=10, end=12, en="hello")]
+
+    unchanged, scale, applied = pipeline._align_whisper_segments(segments, 654.063, 654.080)
+    assert unchanged == segments
+    assert scale == 1
+    assert applied is False
+
+    aligned, scale, applied = pipeline._align_whisper_segments(segments, 600, 660)
+    assert scale == 1.1
+    assert applied is True
+    assert aligned[0].start == 11
+    assert round(aligned[0].end, 6) == 13.2
+
+    rejected, scale, applied = pipeline._align_whisper_segments(segments, 500, 660)
+    assert rejected == segments
+    assert scale == 1.32
+    assert applied is False
+
+
+def test_old_bilibili_whisper_result_is_kept_and_reprocessed(tmp_path, monkeypatch):
+    cache_dir, work_dir = tmp_path / "cache", tmp_path / "work"
+    cache_dir.mkdir()
+    work_dir.mkdir()
+    url = "https://www.bilibili.com/video/BV1test123?p=1"
+    legacy_path = cache_dir / f"{pipeline.cache_key_from_url(url)}.v8.json"
+    legacy = ProcessedVideo(
+        video_id="BV1test123", title="old", url=url, duration=100,
+        source="whisper", platform="bilibili", source_language="en",
+        segments=[Segment(start=10, end=11, en="old transcript", zh="旧字幕")],
+        summary="old", key_points=[], subtitle_timing_version=0,
+    )
+    legacy_path.write_text(legacy.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(pipeline, "WORK_DIR", work_dir)
+    monkeypatch.setattr(pipeline, "load_config", lambda: ServiceConfig())
+    monkeypatch.setattr(pipeline, "_download", lambda current_url, directory, *args: (
+        {"title": "new", "duration": 100}, [], directory / "audio.wav",
+    ))
+
+    def fake_transcribe(*args):
+        args[-1](100, 90)
+        return [Segment(start=20, end=21, en="new transcript")], "en"
+
+    class FakeLlm:
+        def __init__(self, config): pass
+        async def translate(self, segments, progress):
+            segments[0].zh = "新字幕"
+            progress(1, 1)
+        async def summarize(self, title, segments, on_stream, resume_from=""):
+            return "new", []
+        async def close(self): pass
+
+    monkeypatch.setattr(pipeline, "_transcribe", fake_transcribe)
+    monkeypatch.setattr(pipeline, "LlmClient", FakeLlm)
+    job_id = "reprocess-old-whisper-cache"
+    pipeline.JOBS[job_id] = JobView(id=job_id, state="queued", stage="queued", progress=0)
+
+    asyncio.run(pipeline.process_job(job_id, url))
+
+    job = pipeline.JOBS.pop(job_id)
+    refreshed_path = cache_dir / f"{pipeline.cache_key_from_url(url)}_whisper_timing_v1.v8.json"
+    assert job.result.segments[0].en == "new transcript"
+    assert job.result.subtitle_timing_version == 1
+    assert ProcessedVideo.model_validate_json(legacy_path.read_text(encoding="utf-8")).segments[0].en == "old transcript"
+    assert ProcessedVideo.model_validate_json(refreshed_path.read_text(encoding="utf-8")).subtitle_timing_version == 1
 
 
 def test_read_bilibili_srt_preserves_japanese_language(tmp_path):
@@ -414,5 +482,5 @@ def test_bilibili_japanese_pipeline_writes_site_specific_cache(tmp_path, monkeyp
     assert job.result.source_language == "ja"
     assert job.result.source == "bilibili_subtitles"
     assert job.result.segments[0].zh == "测试"
-    assert (cache_dir / "bilibili_BV1test123_p2.v8.json").exists()
+    assert (cache_dir / "bilibili_BV1test123_p2_whisper_timing_v1.v8.json").exists()
 # Moon End

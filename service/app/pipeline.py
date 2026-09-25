@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ from .config import CACHE_DIR, WORK_DIR, load_config, resolve_install_dir
 from .diagnostics import log_event, log_exception
 from .llm import LlmClient
 from .models import CudaRuntimeStatus, JobView, LocalModelInfo, ModelStatus, ProcessedVideo, Segment
+from .shared_schema import BILIBILI_WHISPER_TIMING_VERSION
 
 
 JOBS: dict[str, JobView] = {}
@@ -164,7 +166,8 @@ class JobControl:
 def _write_json_atomic(path: Path, data: dict) -> None:
     """Write checkpoint JSON without exposing a half-written file after interruption."""
     # Moon Add
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:16]}.tmp")
     try:
         temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(path)
@@ -663,6 +666,7 @@ def _transcribe(
     transcription_preview: Callable[[list[Segment], str], None] | None = None,
     initial_segments: list[Segment] | None = None,
     language_hint: str | None = None,
+    transcription_timing: Callable[[float, float], None] | None = None,
 ) -> tuple[list[Segment], str]:
     _configure_private_cuda_runtime()  # Moon Add: load optional one-click runtime wheels.
     import ctranslate2
@@ -709,6 +713,10 @@ def _transcribe(
             raise RuntimeError(
                 f"仅支持英文、日文、韩文或中文语音，检测到：{info.language or '未知'}"
             )
+        audio_duration = float(getattr(info, "duration", 0) or 0)
+        duration_after_vad = float(getattr(info, "duration_after_vad", audio_duration) or audio_duration)
+        if transcription_timing:
+            transcription_timing(audio_duration, duration_after_vad)
         total_duration = float(expected_duration or getattr(info, "duration", 0) or 0)
         if transcription_progress:
             transcription_progress(resume_from, total_duration)
@@ -752,6 +760,28 @@ def _transcribe(
         return run("cpu")
 
 
+def _align_whisper_segments(
+    segments: list[Segment], audio_duration: float | None, video_duration: float | None,
+) -> tuple[list[Segment], float, bool]:
+    """Map Whisper timestamps to the player timeline only when measured durations differ."""
+    if not audio_duration or not video_duration:
+        return segments, 1.0, False
+    if not math.isfinite(audio_duration) or not math.isfinite(video_duration):
+        return segments, 1.0, False
+    if audio_duration <= 0 or video_duration <= 0:
+        return segments, 1.0, False
+    scale = video_duration / audio_duration
+    if abs(scale - 1.0) <= 0.005:
+        return segments, 1.0, False
+    # A larger mismatch is more likely a bad duration/source pairing than a clock drift.
+    if not 0.9 <= scale <= 1.1:
+        return segments, scale, False
+    return [
+        segment.model_copy(update={"start": segment.start * scale, "end": segment.end * scale})
+        for segment in segments
+    ], scale, True
+
+
 async def process_job(
     job_id: str, url: str, page_subtitles: list[Segment] | None = None,
     page_subtitle_language: str | None = None, page_subtitle_cid: int | None = None,
@@ -768,6 +798,22 @@ async def process_job(
         # Moon Add: keep the official resource CID as cache metadata instead of
         # mutating the user-visible URL with a self-authored query parameter.
         cache_key = f"{cache_key}_cid{page_subtitle_cid}"
+    if platform == "bilibili" and not page_subtitles and not cache_key_override:
+        # Reuse native-caption caches as-is; isolate only old Bilibili Whisper timing data.
+        legacy_path = CACHE_DIR / f"{cache_key}.v{CACHE_SCHEMA_VERSION}.json"
+        legacy_source, legacy_timing_version = "", 0
+        if legacy_path.exists():
+            try:
+                legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+                legacy_source = legacy.get("source", "")
+                legacy_timing_version = legacy.get("subtitle_timing_version", 0)
+            except (OSError, ValueError):
+                pass
+        if not legacy_path.exists() or (
+            legacy_source == "whisper"
+            and legacy_timing_version < BILIBILI_WHISPER_TIMING_VERSION
+        ):
+            cache_key = f"{cache_key}_whisper_timing_v{BILIBILI_WHISPER_TIMING_VERSION}"
     cache_key = cache_key_override or cache_key
     cache_path = CACHE_DIR / f"{cache_key}.v{CACHE_SCHEMA_VERSION}.json"
     provenance = page_subtitle_provenance or {}
@@ -803,6 +849,8 @@ async def process_job(
     segments: list[Segment] = []
     title: str = video_id
     duration: float | None = None
+    audio_duration: float | None = None
+    subtitle_timing_version = 0
     source: str = ""
     source_language: str = "en"
     resume: bool = False
@@ -822,6 +870,8 @@ async def process_job(
             segments = [Segment(**s) for s in data["segments"]]
             title = data.get("title", video_id)
             duration = data.get("duration")
+            audio_duration = data.get("audio_duration")
+            subtitle_timing_version = data.get("subtitle_timing_version", 0)
             source = data.get("source", "resume")
             platform = data.get("platform", platform)
             source_language = data.get(
@@ -904,6 +954,26 @@ async def process_job(
                     if total > 0:
                         job.progress = min(54, 45 + int(processed / total * 9))
 
+                def report_transcription_timing(
+                    measured_audio_duration: float, duration_after_vad: float,
+                ) -> None:
+                    nonlocal audio_duration
+                    audio_duration = (
+                        measured_audio_duration
+                        if math.isfinite(measured_audio_duration) and measured_audio_duration > 0
+                        else None
+                    )
+                    if not math.isfinite(duration_after_vad) or duration_after_vad < 0:
+                        duration_after_vad = 0.0
+                    log_event(
+                        "whisper_timeline_measurement",
+                        job_id=job_id,
+                        platform=platform,
+                        video_duration=info.get("duration"),
+                        audio_duration=audio_duration,
+                        duration_after_vad=duration_after_vad,
+                    )
+
                 def report_transcription_preview(
                     recognized: list[Segment], language: str,
                 ) -> None:
@@ -917,6 +987,8 @@ async def process_job(
                         _write_json_atomic(partial_path, {
                             "title": info.get("title", video_id),
                             "duration": info.get("duration"), "source": "whisper",
+                            "audio_duration": audio_duration,
+                            "subtitle_timing_version": 0,
                             "platform": platform, "source_language": language,
                             "segments": [segment.model_dump() for segment in recognized],
                             "extraction_state": "transcribing",
@@ -934,12 +1006,27 @@ async def process_job(
                     report_transcription, info.get("duration"),
                     report_transcription_preview,
                     recognition_seed, recognition_language,
+                    report_transcription_timing,
                 )
                 await control.checkpoint()
                 # Moon End
                 source = "whisper"
             if not extracted:
                 raise RuntimeError("未识别到有效字幕或语音")
+            if platform == "bilibili" and source == "whisper":
+                extracted, timing_scale, timing_scale_applied = _align_whisper_segments(
+                    extracted, audio_duration, info.get("duration"),
+                )
+                subtitle_timing_version = BILIBILI_WHISPER_TIMING_VERSION
+                log_event(
+                    "whisper_timeline_aligned",
+                    job_id=job_id,
+                    video_duration=info.get("duration"),
+                    audio_duration=audio_duration,
+                    timing_scale=timing_scale,
+                    scale_applied=timing_scale_applied,
+                    segment_count=len(extracted),
+                )
             if source_language == "zh":
                 for segment in extracted:
                     segment.zh = segment.en
@@ -949,6 +1036,8 @@ async def process_job(
             # Save partial state for crash recovery
             _write_json_atomic(partial_path, {
                 "title": title, "duration": duration, "source": source,
+                "audio_duration": audio_duration,
+                "subtitle_timing_version": subtitle_timing_version,
                 "platform": platform, "source_language": source_language,
                 "segments": [s.model_dump() for s in segments],
                 "extraction_state": "completed",
@@ -981,6 +1070,8 @@ async def process_job(
         _write_json_atomic(partial_path, {
             "title": title,
             "duration": duration,
+            "audio_duration": audio_duration,
+            "subtitle_timing_version": subtitle_timing_version,
             "source": source,
             "platform": platform,
             "source_language": source_language,
@@ -1073,6 +1164,8 @@ async def process_job(
         title=title,
         url=url,
         duration=duration,
+        audio_duration=audio_duration,
+        subtitle_timing_version=subtitle_timing_version,
         source=source,
         platform=platform,
         source_language=source_language,

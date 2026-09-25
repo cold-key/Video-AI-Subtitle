@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class ServiceConfig(BaseModel):
@@ -106,6 +106,26 @@ class PageSubtitleDiagnostic(BaseModel):
     provenance: PageSubtitleProvenance | None = None
 
 
+class SubtitlePlaybackDiagnostic(BaseModel):
+    """Numeric playback/timeline telemetry; never accepts caption text or video IDs."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    source: Literal["whisper", "bilibili_subtitles", "youtube_subtitles", "unknown"]
+    player_time: float = Field(ge=0, allow_inf_nan=False)
+    player_duration: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    playback_rate: float = Field(gt=0, le=16, allow_inf_nan=False)
+    wall_elapsed: float = Field(gt=0, le=120, allow_inf_nan=False)
+    media_elapsed: float = Field(allow_inf_nan=False)
+    previous_player_time: float = Field(ge=0, allow_inf_nan=False)
+    cue_index: int | None = Field(default=None, ge=0)
+    cue_start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    cue_end: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    previous_cue_index: int | None = Field(default=None, ge=0)
+    previous_cue_start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    cue_count: int = Field(ge=0)
+    player_count: int = Field(ge=1)
+    selected_player_index: int = Field(ge=0)
+
+
 class VideoRequest(BaseModel):
     url: HttpUrl
     # Moon Add: page-loaded Bilibili captions are a higher-fidelity fallback than ASR.
@@ -130,6 +150,8 @@ class ProcessedVideo(BaseModel):
     title: str
     url: str
     duration: float | None = None
+    audio_duration: float | None = Field(default=None, ge=0)
+    subtitle_timing_version: int = Field(default=0, ge=0)
     source: Literal["youtube_subtitles", "bilibili_subtitles", "whisper"]
     platform: Literal["youtube", "bilibili"] = "youtube"
     source_language: Literal["en", "ja", "ko", "zh"] = "en"

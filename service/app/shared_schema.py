@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .models import ProcessedVideo, Segment
 
 MAX_BYTES = 32 * 1024 * 1024
+BILIBILI_WHISPER_TIMING_VERSION = 1
 
 
 class ResourceIdentity(BaseModel):
@@ -46,6 +47,8 @@ class CacheRecord(BaseModel):
     identity: ResourceIdentity
     title: str
     duration: float | None = Field(default=None, ge=0)
+    audio_duration: float | None = Field(default=None, ge=0)
+    subtitle_timing_version: int = Field(default=0, ge=0)
     source: Literal["youtube_subtitles", "bilibili_subtitles", "whisper"]
     source_language: Literal["en", "ja", "ko", "zh"]
     segments: list[Segment] = Field(min_length=1)
@@ -73,9 +76,21 @@ class CacheRecord(BaseModel):
             previous = segment.start
         if self.source != "whisper" and self.source != f"{self.identity.platform}_subtitles":
             raise ValueError("Source does not match platform")
+        if self.subtitle_timing_version and (
+            self.source != "whisper" or self.identity.platform != "bilibili"
+        ):
+            raise ValueError("Subtitle timing version only applies to Bilibili Whisper results")
         if self.complete and (self.summary_state != "completed" or any(not s.zh.strip() for s in self.segments)):
             raise ValueError("Result is not complete")
         return self
+
+    @property
+    def timing_current(self) -> bool:
+        return not (
+            self.identity.platform == "bilibili"
+            and self.source == "whisper"
+            and self.subtitle_timing_version < BILIBILI_WHISPER_TIMING_VERSION
+        )
 
     @property
     def checksum(self) -> str:
@@ -90,6 +105,7 @@ class CacheRecord(BaseModel):
         return ProcessedVideo(
             video_id=self.identity.video_id, url=url or self.identity.url,
             platform=self.identity.platform, **self.model_dump(include={
-                "title", "duration", "source", "source_language", "segments", "summary", "key_points",
+                "title", "duration", "audio_duration", "subtitle_timing_version", "source",
+                "source_language", "segments", "summary", "key_points",
             }),
         )

@@ -19,7 +19,8 @@ def identity(cid=123):
 def record(complete=True, cid=123):
     return CacheRecord(identity=identity(cid), title="Test", source="whisper", source_language="en",
         segments=[Segment(start=0, end=1, en="hello", zh="你好" if complete else "")],
-        summary="摘要" if complete else "", summary_state="completed" if complete else "idle", complete=complete)
+        summary="摘要" if complete else "", summary_state="completed" if complete else "idle",
+        subtitle_timing_version=1, complete=complete)
 
 
 @pytest.fixture
@@ -132,7 +133,7 @@ async def wait_job(job):
     task = pipeline.JOB_TASKS.get(job.id)
     if task:
         await asyncio.wait_for(task, 5)
-    assert job.state == "completed", job.model_dump()
+    assert job.state == "completed", job.error
 
 
 def test_machine_a_processes_b_reuses_without_subtitle_download_or_llm(machines, monkeypatch):
@@ -250,6 +251,96 @@ def test_cache_checksum_rejects_changed_content():
         shared_client.checked_record(data, identity(), original.checksum)
 
 
+def test_legacy_bilibili_whisper_cache_is_preserved_but_not_reused(machines):
+    _, _ = machines
+    stale = record().model_copy(update={"subtitle_timing_version": 0})
+    shared_client.save_record(stale)
+
+    assert shared_client.any_local_record(identity()) == stale
+    assert shared_client.local_record(identity()) is None
+    shared_client.preserve_stale_record(stale)
+
+    original = shared_client.SHARED_DIR / "results" / f"{identity().key}.json"
+    preserved = shared_client.SHARED_DIR / "results" / f"{identity().key}.timing-v0.json"
+    assert CacheRecord.model_validate_json(original.read_text(encoding="utf-8")).subtitle_timing_version == 0
+    assert CacheRecord.model_validate_json(preserved.read_text(encoding="utf-8")).subtitle_timing_version == 0
+
+
+def test_legacy_v8_whisper_cache_is_not_promoted(machines):
+    _, _ = machines
+    stale_result = record().result().model_copy(update={"subtitle_timing_version": 0})
+    key = pipeline.cache_key_from_url(identity().url)
+    path = pipeline.CACHE_DIR / f"{key}.v8.json"
+    path.write_text(stale_result.model_dump_json(), encoding="utf-8")
+    partial = pipeline.CACHE_DIR / "new.partial.v8.json"
+
+    promoted = shared_jobs.promote_legacy(
+        shared_jobs.SharedJobRequest(url=identity().url, identity=identity()),
+        ServiceConfig(), partial,
+    )
+
+    assert promoted is None
+    assert path.exists()
+
+
+def test_stale_remote_whisper_result_is_retranscribed_and_versioned(machines, server, monkeypatch):
+    config, _ = machines
+    _, remote, _ = server
+    stale = record().model_copy(update={"subtitle_timing_version": 0})
+    owner = claim(remote)
+    assert submit(remote, owner, stale).status_code == 200
+    remote.post(f"/v1/cache/{identity().key}/release", json=lease(owner))
+
+    class FakeLlm:
+        def __init__(self, config):
+            pass
+        async def translate(self, segments, progress, control=None):
+            segments[0].zh = "你好"
+            progress(1, 1)
+        async def summarize(self, title, segments, on_stream, resume_from="", control=None):
+            return "摘要", []
+        async def close(self):
+            pass
+
+    def fake_transcribe(*args):
+        args[-1](600, 550)
+        return [Segment(start=10, end=12, en="hello")], "en"
+
+    monkeypatch.setattr(pipeline, "LlmClient", FakeLlm)
+    monkeypatch.setattr(pipeline, "_download", lambda url, directory, *args: (
+        {"title": "Reprocessed", "duration": 660}, [], directory / "audio.wav",
+    ))
+    monkeypatch.setattr(pipeline, "_transcribe", fake_transcribe)
+
+    async def scenario():
+        request_url = f"{identity().url}?p=1"
+        request = shared_jobs.SharedJobRequest(url=request_url, identity=identity())
+        job = shared_jobs.create_shared_job(request)
+        for _ in range(100):
+            if job.needs_subtitles:
+                break
+            await asyncio.sleep(0.01)
+        assert job.needs_subtitles
+        shared_routes.subtitles(job.id, VideoRequest(
+            url=request_url,
+            page_subtitle_identity=PageSubtitleIdentity(bvid=identity().video_id, cid=123),
+            page_subtitle_status="no_tracks",
+        ))
+        await wait_job(job)
+        assert job.result.source == "whisper"
+        assert job.result.audio_duration == 600
+        assert job.result.subtitle_timing_version == 1
+        assert round(job.result.segments[0].start, 6) == 11
+        assert round(job.result.segments[0].end, 6) == 13.2
+        cached = remote.get(f"/v1/cache/{identity().key}").json()["record"]
+        assert cached["subtitle_timing_version"] == 1
+        assert cached["audio_duration"] == 600
+
+    asyncio.run(scenario())
+    preserved = shared_client.SHARED_DIR / "results" / f"{identity().key}.timing-v0.json"
+    assert CacheRecord.model_validate_json(preserved.read_text(encoding="utf-8")).subtitle_timing_version == 0
+
+
 def test_offline_wait_cancel_and_local_hit(machines, monkeypatch):
     class Offline:
         def __init__(self, config):
@@ -323,7 +414,7 @@ def test_existing_local_v8_is_promoted_without_processing(machines, monkeypatch)
 
 def test_local_override_queues_without_claiming(machines, monkeypatch):
     config, _ = machines
-    partial = pipeline.CACHE_DIR / f"shared_{identity().key}.partial.v8.json"
+    partial = pipeline.CACHE_DIR / f"shared_v1_{identity().key[:32]}.partial.v8.json"
     partial.write_text(json.dumps(record().checkpoint(), ensure_ascii=False), encoding="utf-8")
     from service.app.llm import LlmClient
     class NoRequests(LlmClient):
@@ -378,7 +469,7 @@ def test_local_api_routes_and_shared_secret_redaction(machines, server, monkeypa
 
 
 def test_job_stays_active_until_upload_finishes(machines, monkeypatch):
-    partial = pipeline.CACHE_DIR / f"shared_{identity().key}.partial.v8.json"
+    partial = pipeline.CACHE_DIR / f"shared_v1_{identity().key[:32]}.partial.v8.json"
     partial.write_text(json.dumps(record().checkpoint()), encoding="utf-8")
     factory = shared_jobs.SharedClient
     async def scenario():

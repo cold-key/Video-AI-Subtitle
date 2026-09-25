@@ -22,7 +22,7 @@ class SharedError(Exception):
 
 def atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:16]}.tmp")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
         temporary.replace(path)
@@ -77,13 +77,27 @@ def checked_record(data, identity, checksum=None):
     return record
 
 
-def local_record(identity):
+def any_local_record(identity):
     path = SHARED_DIR / "results" / f"{identity.key}.json"
     try:
         record = checked_record(json.loads(path.read_text(encoding="utf-8")), identity)
         return record if record.complete else None
     except (OSError, ValueError, SharedError):
         return None
+
+
+def local_record(identity):
+    record = any_local_record(identity)
+    return record if record and record.timing_current else None
+
+
+def preserve_stale_record(record):
+    """Keep a local copy before a legacy timing record is replaced."""
+    if record.timing_current:
+        return
+    path = SHARED_DIR / "results" / f"{record.identity.key}.timing-v{record.subtitle_timing_version}.json"
+    if not path.exists():
+        atomic_json(path, record.model_dump())
 
 
 def save_record(record):
@@ -121,6 +135,8 @@ async def flush_outbox(config):
                 if pending["destination"] != destination:
                     continue
                 record = CacheRecord.model_validate(pending["record"])
+                if not record.timing_current:
+                    continue
                 claim = await client.claim(record.identity, "outbox-" + uuid.uuid4().hex)
                 if claim["state"] == "busy":
                     continue

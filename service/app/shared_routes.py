@@ -13,7 +13,10 @@ from pydantic import BaseModel
 from . import pipeline
 from .config import load_config
 from .models import ProcessedVideo, VideoRequest
-from .shared_client import SHARED_DIR, SharedClient, SharedError, atomic_json, discard_queued, local_record, queue_record, save_record
+from .shared_client import (
+    SHARED_DIR, SharedClient, SharedError, atomic_json, checked_record,
+    discard_queued, local_record, queue_record, save_record,
+)
 from .shared_jobs import CAPTIONS, REQUESTS, SharedJobRequest, create_shared_job, make_record
 from .shared_schema import ResourceIdentity
 
@@ -82,6 +85,10 @@ async def preflight(request: SharedJobRequest):
     client = SharedClient(config)
     try:
         data = await client.request("GET", f"v1/cache/{request.identity.key}")
+        if data.get("state") == "complete":
+            record = checked_record(data["record"], request.identity, data.get("checksum"))
+            if not record.timing_current:
+                return {"state": "missing", "origin": "shared", "stale_timing": True}
         return {"state": data["state"], "origin": "shared"}
     except SharedError:
         return {"state": "offline"}
@@ -173,6 +180,8 @@ async def import_legacy():
                 if cid and int(cid[1]) != identity.cid:
                     raise ValueError("旧 CID 与当前资源不一致")
                 record = make_record(identity, result.model_dump(), True, config)
+                if not record.timing_current:
+                    raise ValueError("B 站旧版语音时间戳缓存需重建")
                 # Legacy generation settings are unknown, not today's settings.
                 for name in ("translation_model", "summary_model", "whisper_model", "translation_prompt_hash", "summary_prompt_hash"):
                     setattr(record, name, "")
@@ -200,7 +209,10 @@ async def import_legacy():
                             await client.lease_action(identity, lease, "release")
             except (ValueError, OSError, KeyError, IndexError, StopIteration, HTTPException) as exc:
                 # Do not surface arbitrary external API messages or record text.
-                safe_reasons = {"非 v8 完整旧缓存", "旧缓存身份不一致", "旧 CID 与当前资源不一致", "同一资源已有更新的有效文件"}
+                safe_reasons = {
+                    "非 v8 完整旧缓存", "旧缓存身份不一致", "旧 CID 与当前资源不一致",
+                    "同一资源已有更新的有效文件", "B 站旧版语音时间戳缓存需重建",
+                }
                 reason = str(exc) if str(exc) in safe_reasons else "格式、完整性或视频身份校验未通过"
             except Exception:
                 outcome, reason = "failed", "网络或共享服务错误，请重试"

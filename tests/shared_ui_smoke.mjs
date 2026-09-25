@@ -20,7 +20,15 @@ window.chrome={runtime:{sendMessage:async message=>{
   if(message.type==='fetch-bilibili-subtitles'){captionRequests++;return {segments:[],status:'no_tracks',identity:{bvid:'BV1test123',cid:123}};}
   return {ok:true};
 },onMessage:{addListener:fn=>{listener=fn;window.startTest=()=>fn({type:'start'});}}},storage:{local:{get:async defaults=>defaults,set:async()=>{}},onChanged:{addListener:()=>{}}}};
-const result={video_id:'BV1test123',title:'共享字幕测试',url:location.href,duration:2,source:'whisper',platform:location.hostname.includes('bilibili')?'bilibili':'youtube',source_language:'en',segments:[{start:0,end:2,en:'Hello from another computer.',zh:'这是另一台电脑生成的字幕。'}],summary:'共享缓存摘要',key_points:[]};
+const result={video_id:'BV1test123',title:'共享字幕测试',url:location.href,duration:2,source:'whisper',platform:location.hostname.includes('bilibili')?'bilibili':'youtube',source_language:'en',segments:[{start:0,end:1,en:'First sentence.',zh:'第一句译文。'},{start:1,end:2,en:'Second sentence.',zh:'第二句译文。'}],summary:'共享缓存摘要',key_points:[]};
+window.installTestVideoState=(video,time)=>{
+  Object.defineProperties(video,{
+    paused:{configurable:true,get:()=>false},ended:{configurable:true,get:()=>false},
+    readyState:{configurable:true,get:()=>4},duration:{configurable:true,get:()=>2},
+    currentTime:{configurable:true,get:()=>video._testTime||0,set:value=>{video._testTime=value;}},
+  });
+  video.currentTime=time;
+};
 const config={base_url:'https://model.invalid/v1',api_key_configured:true,translation_model:'test',summary_model:'test',whisper_model:'small',device:'cpu',shared_cache_enabled:true,shared_cache_url:'https://cache.invalid',shared_cache_token_configured:true};
 window.fetch=async (url,options={})=>{
   const pathname=new URL(url,location.href).pathname;testRequests.push(pathname);
@@ -43,7 +51,10 @@ const server=createServer(async(req,res)=>{
       res.end(html.replace('<script src="options.js"></script>',`<script>${shim}</script><script src="/options.js"></script>`));
     }else if(pathname.startsWith('/video/')||pathname==='/watch'){
       res.setHeader("Content-Type","text/html;charset=utf-8");
-      res.end(`<!doctype html><meta charset="utf-8"><title>Isolated video UI test</title><link rel="stylesheet" href="/content.css"><style>body{background:#242936;color:white;font:20px Arial}video{width:800px;height:450px;background:#12151b}</style><h1>共享缓存视频面板测试</h1><div class="bpx-player-container html5-video-player"><video controls></video></div><script>${shim}</script><script src="/content.js"></script>`);
+      const playerMarkup=req.headers.host.startsWith('bilibili.com.localhost')
+        ? '<div class="bpx-player-container"><video id="hidden-decoy" style="display:none"></video><video id="active-video" controls></video></div>'
+        : '<div class="html5-video-player"><video id="active-video" controls></video></div>';
+      res.end(`<!doctype html><meta charset="utf-8"><title>Isolated video UI test</title><link rel="stylesheet" href="/content.css"><style>body{background:#242936;color:white;font:20px Arial}video{width:800px;height:450px;background:#12151b}</style><h1>共享缓存视频面板测试</h1>${playerMarkup}<script>${shim}</script><script src="/content.js"></script>`);
     }else if(['/options.js','/content.js','/content.css'].includes(pathname)){
       res.setHeader("Content-Type",pathname.endsWith('.css')?'text/css':'application/javascript');
       res.end(await readFile(path.join(root,'extension',pathname.slice(1))));
@@ -74,7 +85,7 @@ try{
   socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id){const item=pending.get(message.id);pending.delete(message.id);message.error?item.reject(new Error(message.error.message)):item.resolve(message.result);}};
   const call=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Browser command timed out: '+method));},10000);pending.set(id,{resolve:value=>{clearTimeout(timer);resolve(value);},reject:error=>{clearTimeout(timer);reject(error);}});socket.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
-  const wait=async expression=>{for(let i=0;i<80;i++){try{if(await evaluate(expression))return;}catch{}await new Promise(r=>setTimeout(r,100));}await writeFile(path.join(output,'failed.png'),Buffer.from((await call('Page.captureScreenshot')).data,'base64'));throw new Error('Timed out: '+expression+' '+await evaluate('JSON.stringify({errors:window.testErrors,body:document.body.innerText})'));};
+  const wait=async expression=>{for(let i=0;i<80;i++){try{if(await evaluate(expression))return;}catch{}await new Promise(r=>setTimeout(r,100));}await writeFile(path.join(output,'failed.png'),Buffer.from((await call('Page.captureScreenshot')).data,'base64'));throw new Error('Timed out: '+expression+' '+await evaluate('JSON.stringify({host:location.hostname,errors:window.testErrors,body:document.body.innerText,videos:[...document.querySelectorAll("video")].map(v=>({id:v.id,rect:[v.getBoundingClientRect().width,v.getBoundingClientRect().height],display:getComputedStyle(v).display,paused:v.paused,time:v.currentTime,duration:v.duration})),active:document.querySelector(".ytba-segment.active")?.dataset.index,overlay:document.querySelector("#ytba-overlay")?.textContent})'));};
   await call('Page.enable');
   await call('Page.navigate',{url:`http://localhost:${port}/options.html`});
   await wait("document.querySelector('#shared_cache_enabled')?.checked");
@@ -92,6 +103,15 @@ try{
     assert.match(await evaluate("document.querySelector('[data-status]').textContent"),/共享缓存/);
     assert.deepEqual(await evaluate('testErrors'),[]);
     await writeFile(path.join(output,`${site}-cached.png`),Buffer.from((await call('Page.captureScreenshot')).data,'base64'));
+    if(site==='bilibili'){
+      await evaluate("installTestVideoState(document.querySelector('#active-video'),1.5);document.querySelector('#active-video').dispatchEvent(new Event('timeupdate'))");
+      await wait("document.querySelector('.ytba-segment.active')?.dataset.index==='1'");
+      assert.match(await evaluate("document.querySelector('#ytba-overlay').textContent"),/第二句译文/);
+      await evaluate(`(()=>{const old=document.querySelector('#active-video');const replacement=document.createElement('video');replacement.id='replacement-video';replacement.controls=true;old.replaceWith(replacement);installTestVideoState(replacement,.5);setTimeout(()=>replacement.dispatchEvent(new Event('timeupdate')),180)})()`);
+      await wait("document.querySelector('.ytba-segment.active')?.dataset.index==='0'");
+      assert.deepEqual(await evaluate('testErrors'),[]);
+      await writeFile(path.join(output,'bilibili-player-replaced.png'),Buffer.from((await call('Page.captureScreenshot')).data,'base64'));
+    }
     await evaluate("testState='offline';startTest()");
     await wait("document.querySelector('[data-shared-local]')?.hidden===false");
     assert.deepEqual(await evaluate('testErrors'),[]);
